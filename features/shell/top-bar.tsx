@@ -1,9 +1,9 @@
 "use client";
 
 import { usePathname } from "next/navigation";
-import { type RefObject } from "react";
+import { type RefObject, useState } from "react";
 
-import { PanelIcon } from "./icons";
+import { CheckIcon, LinkIcon, PanelIcon } from "./icons";
 import { PLACEHOLDER_STANDINGS } from "./placeholder-standings";
 import { StandingsStrip } from "./standings-strip";
 
@@ -24,6 +24,43 @@ const describe = (pathname: string): readonly string[] => {
 
 /** A brand-new thread has no turns yet, so there is no record to show. */
 const showsStandings = (pathname: string) => pathname.startsWith("/t/");
+
+/**
+ * This is the whole "sharing" half of feature 8: the link already works for
+ * anyone, signed in or not (the page itself has no gate), so this button
+ * doesn't ask permission, it just copies the url that's already sitting in
+ * the address bar and says so, briefly, rather than a bare icon that gives
+ * no feedback that anything actually happened.
+ */
+const ShareButton = () => {
+  const [copied, setCopied] = useState(false);
+
+  const copyLink = async () => {
+    await navigator.clipboard.writeText(window.location.href);
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 2000);
+  };
+
+  return (
+    <button
+      type="button"
+      onClick={copyLink}
+      className="border-input hover:bg-muted text-muted-foreground hover:text-foreground flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-xs font-medium transition-colors"
+    >
+      {copied ? (
+        <>
+          <CheckIcon className="text-winner size-3.5" />
+          <span aria-live="polite">Copied</span>
+        </>
+      ) : (
+        <>
+          <LinkIcon className="size-3.5" />
+          Copy link
+        </>
+      )}
+    </button>
+  );
+};
 
 export const TopBar = ({
   onOpenSidebar,
@@ -72,6 +109,7 @@ export const TopBar = ({
         </ol>
       </nav>
 
+      {pathname.startsWith("/t/") && <ShareButton />}
       {showsStandings(pathname) && <StandingsStrip standings={PLACEHOLDER_STANDINGS} />}
     </header>
   );

@@ -8,7 +8,7 @@ import { type ReactNode } from "react";
 import { cn } from "@/infrastructure/ui";
 
 import { ArenaIcon, LeaderboardIcon, ModelsIcon, PlusIcon } from "./icons";
-import { PLACEHOLDER_THREAD_GROUPS } from "./placeholder-threads";
+import { type ThreadGroup } from "./thread-history";
 
 const NAV = [
   { href: "/", label: "Arena", Icon: ArenaIcon },
@@ -31,9 +31,11 @@ const isActive = (href: string, pathname: string) =>
 export const Sidebar = ({
   footer,
   onNavigate,
+  threadGroups,
 }: {
   readonly footer: ReactNode;
   readonly onNavigate?: () => void;
+  readonly threadGroups: readonly ThreadGroup[];
 }) => {
   const pathname = usePathname();
   /* `Show` is server-only in Clerk 7, and this list has to react to the drawer
@@ -110,8 +112,14 @@ export const Sidebar = ({
             </div>
           )}
 
+          {isSignedIn && threadGroups.length === 0 && (
+            <p className="text-muted-foreground px-2.5 py-3 text-sm leading-relaxed">
+              Nothing yet. Send a prompt to start your first thread.
+            </p>
+          )}
+
           {isSignedIn &&
-            PLACEHOLDER_THREAD_GROUPS.map((group) => (
+            threadGroups.map((group) => (
               <section key={group.label} className="mb-4 last:mb-0">
                 <h3 className="text-muted-foreground px-2.5 py-1.5 text-xs">
                   {group.label}

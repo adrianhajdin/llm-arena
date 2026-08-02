@@ -71,3 +71,17 @@ export const PlusIcon = ({ className }: IconProps) => (
     <path d="M12 5v14M5 12h14" />
   </Frame>
 );
+
+/** A link, for copying a thread's shareable url. */
+export const LinkIcon = ({ className }: IconProps) => (
+  <Frame className={className}>
+    <path d="M10 14a4.5 4.5 0 0 0 6.4.4l2-2a4.5 4.5 0 0 0-6.36-6.37l-1.14 1.13" />
+    <path d="M14 10a4.5 4.5 0 0 0-6.4-.4l-2 2a4.5 4.5 0 0 0 6.36 6.37l1.13-1.13" />
+  </Frame>
+);
+
+export const CheckIcon = ({ className }: IconProps) => (
+  <Frame className={className}>
+    <path d="m5 12.5 4.5 4.5L19 7" />
+  </Frame>
+);

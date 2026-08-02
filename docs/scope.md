@@ -16,17 +16,17 @@ There are rough hand-drawn sketches for the arena screen, the leaderboard, and t
 
 ## At a glance
 
-| #   | Feature                                     | Phase      | Status                                                           |
-| --- | ------------------------------------------- | ---------- | ---------------------------------------------------------------- |
-| 1   | Connecting to a model                       | Foundation | done, verified end to end                                        |
-| 2   | Coding standards & tooling                  | Foundation | done, enforcement verified                                       |
-| 3   | Data model                                  | Foundation | done, verified against the real database                         |
-| 4   | Design & look                               | Foundation | built, contrast measured, needs an eye check                     |
-| 5   | Model picker                                | Slice 1    | built and verified, needs a keyboard check                       |
-| 6   | Send a prompt, parallel streams, and voting | Slice 1    | Built, typecheck/lint/build pass, needs a manual end-to-end pass |
-| 7   | App shell & thread history                  | Slice 2    | UI built with placeholders, needs a keyboard check               |
-| 8   | Public thread visibility & sharing          | Slice 3    | not started                                                      |
-| 9   | Leaderboard: global & personal              | Slice 4    | not started                                                      |
+| #   | Feature                                     | Phase      | Status                                                             |
+| --- | ------------------------------------------- | ---------- | ------------------------------------------------------------------ |
+| 1   | Connecting to a model                       | Foundation | done, verified end to end                                          |
+| 2   | Coding standards & tooling                  | Foundation | done, enforcement verified                                         |
+| 3   | Data model                                  | Foundation | done, verified against the real database                           |
+| 4   | Design & look                               | Foundation | built, contrast measured, needs an eye check                       |
+| 5   | Model picker                                | Slice 1    | built and verified, needs a keyboard check                         |
+| 6   | Send a prompt, parallel streams, and voting | Slice 1    | Built, typecheck/lint/build pass, needs a manual end-to-end pass   |
+| 7   | App shell & thread history                  | Slice 2    | Built, thread history wired to real data, needs a keyboard check   |
+| 8   | Public thread visibility & sharing          | Slice 3    | Built, typecheck/lint/build pass, needs a person to check as owner |
+| 9   | Leaderboard: global & personal              | Slice 4    | not started                                                        |
 
 ## Foundation
 
@@ -463,14 +463,78 @@ Against a running dev server, all five routes return 200 with zero errors or war
 - [x] Typecheck, lint, `format:check` and a real production build all pass
 - [ ] **Needs a person:** open a narrow window, confirm the drawer opens, Escape closes it, focus returns to the toggle, and a link inside it closes it. Check both themes.
 
+#### Thread history, wired to the real database
+
+The shell above was UI only; `PLACEHOLDER_THREAD_GROUPS` stood in for a signed-in user's actual threads. This closes that placeholder out.
+
+**The query lives in `features/shell/thread-history.ts`, `server-only`, reading `@/infrastructure/database` directly.** It is feature-specific, not a second `infrastructure/` client: nothing else needs a recency-grouped thread list, so it stays where it is used, the same layering feature 5's picker already draws.
+
+**Recency grouping is computed in the query, not eyeballed from a raw timestamp.** "Today" is the calendar day so far, "This week" the six days before that, "Earlier" everything older, all measured from each thread's `updatedAt`. Empty groups are dropped rather than rendered with a heading and nothing under it.
+
+**A thread's model count is the distinct `modelId`s across all its `ModelResponse` rows, not a stored column.** No `Model` table exists (feature 3's decision) and a thread's model set never changes after turn one (feature 6's decision), so this is cheap to compute and never drifts from what the arena actually locked in.
+
+**`Thread.updatedAt` now advances on a follow-up, not only on creation.** `@updatedAt` only fires on a write to the `Thread` row itself, and `start-turn.ts` previously only ever created or read it, never touched it on a reply. Without a deliberate touch, a thread from six turns ago and one from six months ago sort identically the moment both were merely _created_ around the same time, which is exactly the distinction "grouped by recency" exists to draw. `startTurn` now updates the row on every follow-up inside the same transaction that writes the turn.
+
+**The layout fetches this server-side and hands it down as a prop, rather than the sidebar reading it itself.** The sidebar is a client component (it needs `usePathname` and the drawer's `onNavigate`), and this needs a signed-in `userId` from Clerk plus a database round trip, neither of which belongs in client code. `app/(shell)/layout.tsx` resolves the Clerk `userId`, looks up the app's own `users.id` via `findAppUserId` (no upsert: a shell render should never be the thing that creates a user row), and passes the resulting groups into `AppShell` → `Sidebar` as `threadGroups`. Signed out, or before a first prompt, that's simply `[]`, which the sidebar already had a rule for.
+
+**A new thread needs an explicit `router.refresh()` after `router.push`, and a follow-up needs one too.** The App Router does not re-run a shared layout on a plain navigation between sibling routes it has already rendered, and here the layout is exactly where the thread list is read. Without the refresh, a brand-new thread would not appear in the sidebar until some unrelated hard reload, and a follow-up's recency bump would not reorder it. Both call sites in `arena-screen.tsx` now pair `push`/local state update with `refresh()`.
+
+#### What got built
+
+- `features/shell/thread-history.ts`, the query and its `ThreadSummary`/`ThreadGroup` types. `placeholder-threads.ts` deleted.
+- `app/(shell)/layout.tsx` resolves the signed-in user and calls it, passing `threadGroups` down.
+- `sidebar.tsx` and `app-shell.tsx` take `threadGroups` as a prop instead of importing the placeholder; a signed-in user with no threads yet sees a plain sentence instead of an empty section.
+- `features/arena/start-turn.ts` touches `thread.updatedAt` on a follow-up; `arena-screen.tsx` calls `router.refresh()` after both a new-thread `push` and a follow-up send.
+
+#### Verified
+
+Typecheck, lint and a real production build all pass. Checked against the real running dev server and a real signed-in session (not a throwaway probe, since this reads the account already in use): the sidebar rendered live "Today"/"This week"/"Earlier" groups with real thread titles and model counts, sending a follow-up in an open thread was visible in the server log with no new errors, and the transient `PLACEHOLDER_THREAD_GROUPS` / `threadGroups.length` errors seen mid-edit in the dev log were Fast Refresh serving a stale client module against the old and new prop shape in turn, not a real bug: they stopped the moment the edit finished landing, and the following compiles and requests were clean.
+
+- [x] Decide the approach
+- [x] `features/shell/thread-history.ts`: real threads, grouped by recency, with a real model count
+- [x] `Thread.updatedAt` bumped on a follow-up so recency reflects real activity
+- [x] Sidebar and shell take `threadGroups` as a prop; placeholder file deleted
+- [x] `router.refresh()` after a new thread's navigation and after a follow-up
+- [x] Typecheck, lint, `format:check` and a real production build all pass
+- [x] Verified against a running dev server and a real signed-in session: real groups, titles, and model counts render; no new server errors
+- [ ] **Needs a person:** confirm in the browser that a brand-new thread appears in "Today" immediately after the first prompt, and that a follow-up in an older thread moves it back up to "Today" without a manual reload.
+
 ## Slice 3: Public visibility & sharing
 
 ### 8. Public thread visibility & sharing
 
 Anyone should be able to open a thread's link and see it, without an account, that's what actually makes it shareable. Only sending a prompt and voting need sign-in. A made-up or deleted thread just shows a plain not-found page either way. The thread's real owner sees everything everyone else sees, plus the ability to actually use it.
 
-- [ ] Decide the approach
-- [ ] Build it
+#### Decided
+
+**The hard part was already built, by features 6 and 7, without either of them meaning to.** `/t/[threadId]` has never had an auth gate, and `startTurn` and `castVote` already refuse anyone but the thread's owner server-side, with a plain sentence, since features 3 and 6 keyed both on `existingThread.userId !== user.id`. Reading the code before deciding anything found that this feature's real job is narrower than it reads: not "make threads visible," they already are, but "make the UI agree with that up front," and add the one thing that's genuinely missing, a way to actually grab the link.
+
+**No `visibility` column, confirmed rather than merely inherited.** Feature 3 parked that decision here on purpose. Now that this feature is being built, the answer is: still no column. Every thread is reachable by its own unguessable id and nothing else, there is no private/public toggle to store, which is exactly what "anyone with the link" already means. Adding a column would model a choice nobody is being asked to make.
+
+**`isOwner` is computed once, server-side, in `ThreadPage`, and carried down as a plain prop.** Resolve the viewer's own Clerk id, look up their app `userId` (no upsert, same reasoning as feature 7: loading a thread should never be the thing that creates a user row), compare it to the thread's `userId` already being read. `ArenaScreen` hides the entire `Composer` behind it and folds `isOwner` into `canVote` alongside the existing two-or-more-answers check. A non-owner sees a single plain sentence instead: "You're viewing someone else's thread. Only its owner can add to it or vote." This is a UI-only change, not a new guard: `startTurn` and `castVote` were already the real enforcement, this just stops a visitor from typing into a box that was always going to refuse them.
+
+**Sharing itself is a "Copy link" button in the top bar, shown on any `/t/[id]` route, for anyone.** Not owner-gated: the url in the address bar is already just as public, so hiding the button from a non-owner would protect nothing while making the feature harder to find for the person who most wants it, someone who was just sent the link. It copies `window.location.href` and confirms with a brief "Copied" swap rather than a bare icon that gives no feedback that anything happened.
+
+#### What got built
+
+- `app/(shell)/t/[threadId]/page.tsx` now selects `userId` on the thread, resolves the viewer's own app user id via Clerk, and passes `isOwner` to `ArenaScreen`.
+- `features/arena/arena-screen.tsx`: `isOwner` prop (defaults `true`, since starting a brand-new thread inherently owns it), gates the `Composer` and folds into `canVote`; a non-owner gets the plain-sentence notice instead of the composer.
+- `features/shell/top-bar.tsx`: a "Copy link" control on thread routes, with `LinkIcon`/`CheckIcon` added to `features/shell/icons.tsx`.
+
+#### Verified
+
+Typecheck, lint and a real production build all pass. Against a running dev server, using the codebase's established pattern for what `curl` can't reach on its own, a throwaway probe route read a real thread id, then was deleted:
+
+- A made-up thread id still returns a real 404 page.
+- A real thread, requested with no session at all (`curl`, so definitely not its owner), returns 200: the page renders, no `<textarea>` and no "Pick this" button appear anywhere in the served HTML, and the plain sentence "You're viewing someone else's thread. Only its owner can add to it or vote." is present. "Copy link" is present on the same page.
+
+- [x] Decide the approach
+- [x] `isOwner` resolved server-side and threaded down to the arena screen
+- [x] Composer and every vote button hidden for a non-owner, replaced with a plain sentence
+- [x] "Copy link" control on thread routes, for anyone
+- [x] Typecheck, lint, `format:check` and a real production build all pass
+- [x] Verified: a made-up thread 404s; a real thread viewed with no session renders read-only, with no composer and no vote button, and the copy-link control present
+- [ ] **Needs a person:** open a thread signed in as its real owner and confirm the composer and vote buttons still render normally; click "Copy link" in a real browser and confirm the clipboard actually holds the url (a headless check can't observe the clipboard itself)
 
 ## Slice 4: Leaderboard
 

@@ -154,6 +154,14 @@ type ArenaScreenProps = {
   readonly initialTurns?: readonly TurnState[];
   /** This thread's fixed models, derived from its own first turn. */
   readonly lockedModels?: readonly LockedModel[] | null;
+  /**
+   * Whether the person looking at this screen is the thread's real owner.
+   * Always `true` for a brand-new thread, since whoever starts one is
+   * inherently its owner. `false` hides the composer and every vote button —
+   * `startTurn` and `castVote` already refuse a non-owner server-side, this
+   * just agrees with that up front instead of letting a visitor try and fail.
+   */
+  readonly isOwner?: boolean;
 };
 
 export const ArenaScreen = ({
@@ -163,6 +171,7 @@ export const ArenaScreen = ({
   threadId = null,
   initialTurns = [],
   lockedModels = null,
+  isOwner = true,
 }: ArenaScreenProps) => {
   const router = useRouter();
   const [turns, setTurns] = useState<readonly TurnState[]>(initialTurns);
@@ -190,6 +199,13 @@ export const ArenaScreen = ({
     );
 
   useEffect(() => {
+    // A non-owner never opened a stream, so they must never try to advance
+    // one either: their own `/api/chat` call would be refused by the same
+    // server-side check that already gates `startTurn` and `castVote`, and
+    // that refusal would flip a genuinely in-progress answer to `FAILED` on
+    // their screen for no reason but that they opened the link.
+    if (!isOwner) return;
+
     turns.forEach((turn, turnIndex) => {
       turn.responses.forEach((response) => {
         if (response.status !== "STREAMING") return;
@@ -211,7 +227,7 @@ export const ArenaScreen = ({
         });
       });
     });
-  }, [turns]);
+  }, [turns, isOwner]);
 
   const handleSend = async (prompt: string, models: readonly LockedModel[]) => {
     setPending(true);
@@ -227,7 +243,12 @@ export const ArenaScreen = ({
     }
 
     if (threadId === null) {
+      // The sidebar's thread list (feature 7) is read server-side in the shared
+      // shell layout, which the App Router does not re-run on a plain `push` to
+      // a route it has never rendered. `refresh()` forces that reread so the
+      // new thread shows up without a hard reload.
       router.push(`/t/${result.threadId}`);
+      router.refresh();
       return;
     }
 
@@ -247,6 +268,10 @@ export const ArenaScreen = ({
         })),
       },
     ]);
+
+    // Same reason as above: a follow-up bumps the thread's `updatedAt`, and the
+    // sidebar's recency grouping needs that reread to reflect it.
+    router.refresh();
   };
 
   const handleVote = async (turnId: string, modelResponseId: string) => {
@@ -292,7 +317,7 @@ export const ArenaScreen = ({
                 (response) => response.status === "COMPLETE",
               ).length;
               const hasVote = turn.responses.some((response) => response.won);
-              const canVote = completeCount >= 2 && !hasVote;
+              const canVote = isOwner && completeCount >= 2 && !hasVote;
 
               return (
                 <div key={turn.id} className="flex flex-col gap-5">
@@ -345,13 +370,20 @@ export const ArenaScreen = ({
         )}
       </div>
 
-      <Composer
-        catalog={catalog}
-        defaultSelection={defaultSelection}
-        locked={lockedModels}
-        disabled={pending}
-        onSend={handleSend}
-      />
+      {isOwner ? (
+        <Composer
+          catalog={catalog}
+          defaultSelection={defaultSelection}
+          locked={lockedModels}
+          disabled={pending}
+          onSend={handleSend}
+        />
+      ) : (
+        <p className="text-muted-foreground border-border border-t px-4 py-4 text-center text-sm sm:px-6">
+          You&rsquo;re viewing someone else&rsquo;s thread. Only its owner can add to it
+          or vote.
+        </p>
+      )}
     </div>
   );
 };

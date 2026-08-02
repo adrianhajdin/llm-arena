@@ -96,12 +96,19 @@ export const startTurn = async (input: StartTurnInput): Promise<StartTurnResult>
           .then((rows) => rows.map((row) => ({ id: row.modelId, name: row.modelName })))
       : input.models;
 
-    const thread =
-      existingThread ??
-      (await tx.thread.create({
-        data: { userId: user.id, title: prompt.slice(0, 80) },
-        select: { id: true },
-      }));
+    // Touched on every follow-up so the sidebar's recency grouping (feature 7)
+    // reflects a thread's last real activity, not just when it was created.
+    // `@updatedAt` only fires on a write to the Thread row itself.
+    const thread = existingThread
+      ? await tx.thread.update({
+          where: { id: existingThread.id },
+          data: { updatedAt: new Date() },
+          select: { id: true },
+        })
+      : await tx.thread.create({
+          data: { userId: user.id, title: prompt.slice(0, 80) },
+          select: { id: true },
+        });
 
     const turn = await tx.turn.create({
       data: { threadId: thread.id, prompt },
