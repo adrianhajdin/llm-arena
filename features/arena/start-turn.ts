@@ -1,6 +1,7 @@
 "use server";
 
 import { auth } from "@clerk/nextjs/server";
+import { revalidatePath } from "next/cache";
 
 import { trackPromptSent } from "@/infrastructure/analytics-events";
 import { MAX_SELECTED_MODELS, MIN_SELECTED_MODELS } from "@/infrastructure/model-catalog";
@@ -139,6 +140,12 @@ export const startTurn = async (input: StartTurnInput): Promise<StartTurnResult>
       turnId: result.turnId,
       modelIds: result.responses.map((response) => response.modelId),
     });
+
+    // The sidebar's thread list (feature 7) is read server-side in the shared
+    // shell layout. Revalidating here, before the client navigates, means the
+    // new thread is already there when `/t/[threadId]` renders instead of
+    // depending on a client-side `refresh()` racing the navigation.
+    revalidatePath("/", "layout");
   }
 
   return result;

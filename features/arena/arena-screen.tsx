@@ -253,12 +253,10 @@ export const ArenaScreen = ({
     }
 
     if (threadId === null) {
-      // The sidebar's thread list (feature 7) is read server-side in the shared
-      // shell layout, which the App Router does not re-run on a plain `push` to
-      // a route it has never rendered. `refresh()` forces that reread so the
-      // new thread shows up without a hard reload.
+      // The sidebar's thread list is revalidated server-side in `startTurn`
+      // itself, so a plain `push` is enough here — no `refresh()` racing the
+      // navigation (that race is what caused prod to snap back to `/`).
       router.push(`/t/${result.threadId}`);
-      router.refresh();
       return;
     }
 
