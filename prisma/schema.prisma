@@ -1,9 +1,14 @@
 // Prisma schema for LLM Arena.
 //
-// Feature 1 owns only the piece its own Clerk wiring implies: a User row keyed
-// to a Clerk id, so a signed-in person has something to hang records off. The
-// real modelling, threads, per-model messages, and votes, belongs to feature 3
-// in docs/scope.md and extends this file rather than replacing it.
+// The unit here is a *turn*, not a flat list of messages. One turn holds the
+// user's prompt once and fans out to one ModelResponse per model. That is what
+// makes "a vote only exists once two or more models answered" expressible at
+// all: a vote hangs off a turn, not off a message. A follow-up is simply the
+// next turn, and one model's own conversation is the thread's turns with that
+// model's response taken from each, so the prompt is stored once instead of
+// being duplicated per model.
+//
+// See docs/scope.md, feature 3, for the reasoning behind each decision.
 
 generator client {
   provider = "prisma-client"
@@ -20,5 +25,143 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  threads Thread[]
+  votes   Vote[]
+
   @@map("users")
+}
+
+/// One conversation, owned by one signed-in person.
+///
+/// There is deliberately no visibility column yet. Public sharing is feature
+/// 8's decision to make, and guessing at it now would bake in a rule nobody
+/// has actually decided.
+model Thread {
+  id        String   @id @default(cuid())
+  userId    String
+  title     String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user  User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  turns Turn[]
+
+  @@index([userId, updatedAt])
+  @@map("threads")
+}
+
+/// One prompt, and every model's answer to it.
+///
+/// Ordering is by createdAt rather than an explicit position column: turns are
+/// only ever appended, one at a time, by a single owner, so there is no
+/// reordering or concurrent insert for a position column to protect against.
+model Turn {
+  id        String   @id @default(cuid())
+  threadId  String
+  prompt    String
+  createdAt DateTime @default(now())
+
+  thread    Thread          @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  responses ModelResponse[]
+  vote      Vote?
+
+  @@index([threadId, createdAt])
+  @@map("turns")
+}
+
+/// How one model's answer ended.
+///
+/// A failure is a real row, not an absent one. Dropping failed calls would let
+/// a model that dies often look better on the leaderboard than one that
+/// answers slowly but always finishes.
+enum ModelResponseStatus {
+  STREAMING
+  COMPLETE
+  FAILED
+
+  @@map("model_response_status")
+}
+
+/// One model's answer to one turn, with the numbers actually measured for it.
+///
+/// The metric fields mirror ModelResponseMetrics in
+/// features/chat/model-response-metrics.ts exactly, nullable in the same
+/// places, so the number rendered on a response card and the number written
+/// here are the same measured value rather than two estimates that can drift.
+model ModelResponse {
+  id     String @id @default(cuid())
+  turnId String
+
+  /// The OpenRouter id, e.g. "meta-llama/llama-3.3-70b-instruct:free". There is
+  /// no Model table on purpose: the catalog is OpenRouter's live free-tier list
+  /// (feature 5), and mirroring it into Postgres buys a sync problem and
+  /// nothing else. The leaderboard groups by this column.
+  modelId String
+
+  /// A snapshot of the display name at the time of the call, so an old thread
+  /// still renders after a model disappears from the live catalog.
+  modelName String
+
+  text   String              @default("")
+  status ModelResponseStatus @default(STREAMING)
+
+  /// Wall-clock milliseconds from request start to the first token of text.
+  timeToFirstTokenMs Int?
+
+  /// Output tokens over the whole call's wall clock, not just the generating
+  /// window. See the comment in model-response-metrics.ts for why: against a
+  /// provider that buffers and flushes at once, the generating window collapses
+  /// and reports absurd speeds that cannot share a leaderboard column with a
+  /// provider that genuinely streams.
+  tokensPerSecond Decimal? @db.Decimal(10, 2)
+
+  inputTokens  Int?
+  outputTokens Int?
+  totalTokens  Int?
+
+  /// Always 0 today, since every model in this arena is free tier. That is an
+  /// honestly measured zero, not a placeholder, so it is stored and shown.
+  /// Decimal rather than Float because it is still money.
+  costUsd Decimal @default(0) @db.Decimal(10, 6)
+
+  createdAt   DateTime  @default(now())
+  completedAt DateTime?
+
+  turn    Turn  @relation(fields: [turnId], references: [id], onDelete: Cascade)
+  wonVote Vote?
+
+  /// One model answers a given turn once. A retry overwrites its row rather
+  /// than adding a second answer from the same model to the same prompt.
+  @@unique([turnId, modelId])
+  @@index([modelId])
+  @@map("model_responses")
+}
+
+/// The winner of one turn.
+///
+/// Unique on turnId, so a turn is voted on exactly once. Voting is the thread
+/// owner's to do, per feature 8: a public viewer sees everything but only the
+/// owner actually uses the thread, so there is no per-user vote on someone
+/// else's turn to make room for.
+///
+/// The "two or more models must have answered" rule is NOT enforced here. It
+/// is a write-path rule: the vote is created inside a transaction that first
+/// counts the turn's COMPLETE responses and refuses below two. Expressing it in
+/// the database would need a denormalized counter plus hand-written SQL the
+/// schema could not see, which is a drift risk in exchange for a guarantee the
+/// single write path already gives. Anything that creates a Vote must go
+/// through that path.
+model Vote {
+  id              String   @id @default(cuid())
+  turnId          String   @unique
+  userId          String
+  modelResponseId String   @unique
+  createdAt       DateTime @default(now())
+
+  turn          Turn          @relation(fields: [turnId], references: [id], onDelete: Cascade)
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  modelResponse ModelResponse @relation(fields: [modelResponseId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("votes")
 }

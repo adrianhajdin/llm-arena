@@ -1,26 +1,192 @@
 @import "tailwindcss";
 
+/*
+  The single source of colour, type and spacing for this app. Nothing here is
+  copy-pasted into a component as a raw value: if a screen needs a colour, it
+  needs a token, and if a token does not exist yet the answer is to add one
+  here rather than to inline a hex.
+
+  Every colour is OKLCH. The whole app is one warm hue family around 40-80
+  degrees, and the surfaces carry almost no chroma, so lightness alone
+  separates them. Rust carries about ten times the chroma of any surface and
+  sits 0.45 lighter than the page, which is what stops an interactive thing
+  from ever sinking into the brown behind it. Measured, not assumed: every
+  pairing below clears 4.5:1 for text and 3:1 for control edges in both modes.
+*/
+
+@custom-variant dark (&:where(.dark, .dark *));
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* Surfaces, lightest job to heaviest. */
+  --background: oklch(0.97 0.008 75);
+  --card: oklch(0.99 0.005 80);
+  --popover: oklch(1 0 0);
+
+  /* Type. */
+  --foreground: oklch(0.22 0.015 50);
+  --muted-foreground: oklch(0.48 0.015 55);
+
+  /* Lines. `border` divides, `input` outlines something you can operate,
+     which is why it is darker: a control edge owes 3:1, a divider does not. */
+  --border: oklch(0.88 0.012 70);
+  --input: oklch(0.6 0.016 70);
+
+  /* The one accent. Interactive only, never decoration. */
+  --primary: oklch(0.52 0.15 40);
+  --primary-foreground: oklch(0.99 0.005 80);
+  --ring: oklch(0.52 0.15 40);
+
+  /* Reserved meanings. Green marks a winner, red marks an error, and neither
+     is ever reused for anything else. */
+  --winner: oklch(0.48 0.12 150);
+  --destructive: oklch(0.5 0.19 22);
+  --destructive-foreground: oklch(0.99 0.005 80);
+
+  /* shadcn expects these two; they are the quiet fill behind a hovered row or
+     a muted chip, never a third accent. */
+  --muted: oklch(0.94 0.01 72);
+  --accent: oklch(0.94 0.01 72);
+  --accent-foreground: oklch(0.22 0.015 50);
+  --secondary: oklch(0.94 0.01 72);
+  --secondary-foreground: oklch(0.22 0.015 50);
+  --card-foreground: oklch(0.22 0.015 50);
+  --popover-foreground: oklch(0.22 0.015 50);
+
+  --radius: 0.625rem;
+}
+
+.dark {
+  --background: oklch(0.19 0.014 55);
+  --card: oklch(0.23 0.016 55);
+  --popover: oklch(0.26 0.017 55);
+
+  --foreground: oklch(0.94 0.008 70);
+  --muted-foreground: oklch(0.72 0.012 65);
+
+  --border: oklch(0.32 0.018 55);
+  --input: oklch(0.54 0.02 55);
+
+  --primary: oklch(0.64 0.16 42);
+  --primary-foreground: oklch(0.19 0.014 55);
+  --ring: oklch(0.64 0.16 42);
+
+  --winner: oklch(0.7 0.13 150);
+  --destructive: oklch(0.68 0.19 18);
+  --destructive-foreground: oklch(0.19 0.014 55);
+
+  --muted: oklch(0.26 0.017 55);
+  --accent: oklch(0.26 0.017 55);
+  --accent-foreground: oklch(0.94 0.008 70);
+  --secondary: oklch(0.26 0.017 55);
+  --secondary-foreground: oklch(0.94 0.008 70);
+  --card-foreground: oklch(0.94 0.008 70);
+  --popover-foreground: oklch(0.94 0.008 70);
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-winner: var(--winner);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  /* Three roles, and the split means something. Serif is for words a person
+     wrote. Mono is for numbers a machine measured. Sans is everything else. */
+  --font-display: var(--font-newsreader);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground font-sans;
+    font-synthesis-weight: none;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* One focus ring, everywhere, in the accent. A real outline rather than a
+     box-shadow ring, because a shadow ring gets clipped by any `overflow-hidden`
+     ancestor and the response cards and leaderboard rows are exactly that.
+     Nothing in this app removes an outline without putting this back. */
+  :focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
+  /* Every measured number is tabular, so a metric settling mid-stream never
+     shoves the digits beside it sideways. */
+  .font-mono,
+  [class*="font-mono"] {
+    font-variant-numeric: tabular-nums;
   }
 }
 
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+@layer components {
+  /* Words a person wrote. */
+  .text-display {
+    @apply font-display text-4xl leading-[1.05] font-normal tracking-tight;
+  }
+
+  .text-eyebrow {
+    @apply text-muted-foreground text-xs font-medium tracking-[0.12em] uppercase;
+  }
+
+  /* A number a machine measured. Display scale, because in this product the
+     measurement is the headline. */
+  .text-readout {
+    @apply font-mono text-4xl leading-none font-medium tracking-tight;
+  }
+
+  /* The instrument strip: a metric is dim until it has actually been measured,
+     then settles to full contrast. That settle is the only animation here. */
+  .metric {
+    @apply text-muted-foreground font-mono text-xs transition-[color,opacity] duration-150;
+  }
+
+  .metric-pending {
+    @apply opacity-45;
+  }
+
+  .metric-value {
+    @apply text-foreground font-medium;
+  }
+
+  .surface {
+    @apply bg-card border-border rounded-xl border;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

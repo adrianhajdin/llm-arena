@@ -54,7 +54,9 @@ const createProtectedClient = () =>
 const protectedClient = () => (cached ??= createProtectedClient());
 
 const secondsUntil = (resetTime: Date | undefined): number =>
-  resetTime ? Math.max(1, Math.ceil((resetTime.getTime() - Date.now()) / 1000)) : INTERVAL_SECONDS;
+  resetTime
+    ? Math.max(1, Math.ceil((resetTime.getTime() - Date.now()) / 1000))
+    : INTERVAL_SECONDS;
 
 const denial = (message: string, status: number, headers?: HeadersInit): Response =>
   Response.json({ error: message }, { status, headers });

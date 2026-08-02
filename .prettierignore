@@ -1,0 +1,15 @@
+# Vendored agent skills and lockfiles are not ours to reformat.
+.agents
+.claude
+skills-lock.json
+
+.next
+out
+build
+node_modules
+generated
+pnpm-lock.yaml
+prisma/migrations
+next-env.d.ts
+tsconfig.tsbuildinfo
+public

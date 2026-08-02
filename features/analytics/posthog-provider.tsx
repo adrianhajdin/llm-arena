@@ -5,13 +5,9 @@ import posthog from "posthog-js";
 import { PostHogProvider as PostHogContextProvider } from "posthog-js/react";
 import { useEffect, type ReactNode } from "react";
 
-/**
- * `NEXT_PUBLIC_` values have to be read as literal property accesses so Next
- * can inline them into the browser bundle. That rules out the server env
- * module here, which is why these two are checked on their own.
- */
-const posthogKey = process.env.NEXT_PUBLIC_POSTHOG_KEY;
-const posthogHost = process.env.NEXT_PUBLIC_POSTHOG_HOST;
+import { publicEnv } from "@/infrastructure/public-env";
+
+const { posthogKey, posthogHost } = publicEnv;
 
 if (typeof window !== "undefined" && posthogKey && posthogHost) {
   posthog.init(posthogKey, {
