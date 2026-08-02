@@ -16,17 +16,17 @@ There are rough hand-drawn sketches for the arena screen, the leaderboard, and t
 
 ## At a glance
 
-| #   | Feature                                     | Phase      | Status                                             |
-| --- | ------------------------------------------- | ---------- | -------------------------------------------------- |
-| 1   | Connecting to a model                       | Foundation | done, verified end to end                          |
-| 2   | Coding standards & tooling                  | Foundation | done, enforcement verified                         |
-| 3   | Data model                                  | Foundation | done, verified against the real database           |
-| 4   | Design & look                               | Foundation | built, contrast measured, needs an eye check       |
-| 5   | Model picker                                | Slice 1    | not started                                        |
-| 6   | Send a prompt, parallel streams, and voting | Slice 1    | Arcjet layer built and verified, rest not started  |
-| 7   | App shell & thread history                  | Slice 2    | UI built with placeholders, needs a keyboard check |
-| 8   | Public thread visibility & sharing          | Slice 3    | not started                                        |
-| 9   | Leaderboard: global & personal              | Slice 4    | not started                                        |
+| #   | Feature                                     | Phase      | Status                                                           |
+| --- | ------------------------------------------- | ---------- | ---------------------------------------------------------------- |
+| 1   | Connecting to a model                       | Foundation | done, verified end to end                                        |
+| 2   | Coding standards & tooling                  | Foundation | done, enforcement verified                                       |
+| 3   | Data model                                  | Foundation | done, verified against the real database                         |
+| 4   | Design & look                               | Foundation | built, contrast measured, needs an eye check                     |
+| 5   | Model picker                                | Slice 1    | built and verified, needs a keyboard check                       |
+| 6   | Send a prompt, parallel streams, and voting | Slice 1    | Built, typecheck/lint/build pass, needs a manual end-to-end pass |
+| 7   | App shell & thread history                  | Slice 2    | UI built with placeholders, needs a keyboard check               |
+| 8   | Public thread visibility & sharing          | Slice 3    | not started                                                      |
+| 9   | Leaderboard: global & personal              | Slice 4    | not started                                                      |
 
 ## Foundation
 
@@ -268,8 +268,70 @@ Also confirmed against a running dev server: the page returns 200 with zero erro
 
 An "Add model" popover pulling OpenRouter's live free-tier list, sorted by context window, capped at three models, defaulting to all three selected, with removable chips next to the prompt box. Also render that same catalog as a simple `/models` page, name, context window, and pricing for each one, so anyone can browse the full list without opening the picker.
 
-- [ ] Decide the approach
-- [ ] Build it
+#### Decided
+
+**The catalog was measured before deciding anything, and it changed two of these calls.** `GET https://openrouter.ai/api/v1/models` on 2 August 2026 returns 337 models, 14 of them `:free`, exactly matching what feature 1 recorded. Sorted by context window the real top is Nemotron 3 Ultra at **1,000,000** tokens, then a run of five at 262,144, down to 128,000. Both `pricing.prompt` and `pricing.completion` are the string `"0"` for every free model, which is the honest zero this app already commits to showing. The placeholder catalog's model names are all invented and every one of them is wrong, so `features/models/placeholder-catalog.ts` is deleted rather than corrected.
+
+**The catalog fetch lives in `infrastructure/model-catalog.ts`, not in a feature.** Two different features need it, the picker inside the arena's composer and the `/models` browse screen, and the layering rule says a shared thing goes to `infrastructure/` rather than one feature reaching into another. It also genuinely is what that folder holds: a client for an external service, alongside the database, Arcjet and OpenRouter clients. Built lazily like all of those, per the standing rule that `next build` must not demand a real key.
+
+**The picker UI belongs to the arena, the browse page belongs to `features/models/`.** This is the honest split, not a workaround for the import rule. The popover is a composer control, it only makes sense sitting next to the prompt box and the send button, so it ships in `features/arena/`. The `/models` page is a screen for reading the list. They share data, not markup, and the data is in `infrastructure/`.
+
+**The endpoint is public, so the fetch sends no key, and the response is zod-parsed per row.** Unknown fields are ignored and a malformed row is dropped rather than throwing away all fourteen, because OpenRouter adding a field or shipping one odd entry should never be able to empty the picker. Cached with Next's `revalidate` at one hour: this list changes on the order of weeks, and re-fetching per request would put a third-party round trip in front of every page render.
+
+**The default trio is the highest-context model from each of three distinct providers.** Sort by context window descending, then walk the list taking a model only if its provider hasn't been taken yet, until three are held. Today that is Nemotron 3 Ultra (NVIDIA, 1M), Ling-3.0-flash (inclusionAI, 262K) and Poolside Laguna S 2.1 (262K). This was the one genuine fork and it was asked rather than assumed. Plain top-three-by-context is simpler and matches the sorted list the user is looking at, but the free tier is currently five NVIDIA models out of fourteen, so that rule can hand somebody three flavours of one vendor as their first ever comparison, which is the least informative arena this product can open with. A trio pinned by id in code would read better today and go stale silently as the free tier churns. The provider rule stays derived entirely from live data and still degrades sensibly: fewer than three providers just means it falls through to top-of-list.
+
+**Nothing is filtered out of the list.** The fourteen include a content-safety classifier and several with image, audio or video input. Every one of them is a real free text-generating model this app can call, and quietly hiding some behind a name heuristic would be curation pretending to be a catalog. The default-trio rule is where taste gets applied; the list itself stays complete.
+
+**Selection is client state in the arena, not persisted.** No localStorage, no URL param. Feature 6 stores the models with the thread when a prompt is actually sent, which is the durable record, and inventing a second one now would mean two sources of truth to reconcile the moment threads exist.
+
+**One model minimum, three maximum, and the cap explains itself.** At three the "Add model" trigger is disabled with a plain sentence saying why rather than vanishing, and an already-selected model shows as selected in the popover instead of disappearing from it. The last chip cannot be removed, because a composer with nothing to send to is a dead end, not a state.
+
+**Closing a real hole this feature makes closable: `/api/chat` will reject a model that is not on the free list.** Right now the route takes any `modelId` string, which means a signed-in user can name a paid model and spend real money against our key. The route cannot check that today because it has no catalog; once `infrastructure/model-catalog.ts` exists, it can, and it returns a plain sentence and a 400. Written down here rather than left to feature 6 because this feature is what makes it possible.
+
+**shadcn's popover arrives here**, the first component pulled in, since feature 4 pointed `components.json` at the real tokens. No `command`/`cmdk` search: fourteen rows is a list you read, not one you search, and the dependency buys nothing.
+
+**Context windows format decimally, `1M` and `262K`, not the placeholder's divide-by-1024**, which renders a one-million-token window as "977K". Kilo here means the round number a person holds in their head, not a binary kibi.
+
+#### What got built
+
+- `infrastructure/model-catalog.ts`, the **pure** half: the `CatalogModel` type, the cap and the floor, the zod row schema, the parse-and-sort, the default-trio rule and the context formatter. No I/O at all.
+- `infrastructure/fetch-model-catalog.ts`, the **effectful** half, `server-only`: one cached call to OpenRouter, returning `null` rather than throwing.
+- `infrastructure/ui-kit/popover.tsx`, the first shadcn component in the project.
+- `features/arena/model-picker.tsx` and `features/arena/composer.tsx`, the picker and the selection state, lifted out of `arena-screen.tsx`.
+- `features/models/models-screen.tsx`, rewritten as a live table. `placeholder-catalog.ts` deleted.
+- `.measure-bar` in `globals.css`; the four pages that render a catalog now fetch it and pass it down.
+
+**The split into a pure module and an effectful one was not the plan, and it is better than the plan.** The plan said one `infrastructure/model-catalog.ts`. Building it surfaced a real conflict: the module has to be `server-only` so no key or fetch strategy leaks browser-side, but the picker is a client component and needs the cap, the floor and the context formatter at runtime. Rather than exempting anything, the pure rules moved to a module with no I/O that either side can hold, and the network call sits alone in the module that imports it. That is the "side effects at the edges" rule arriving on its own.
+
+**shadcn's `ui` alias moved from `@/features/ui` to `@/infrastructure/ui-kit`.** As generated, `components.json` would have put every primitive inside `features/`, where the boundary lint rule forbids one feature importing another's files, so the very first `shadcn add` would have produced a component nothing was allowed to import. A UI primitive owns no domain and is shared by everything, which is the definition of the bottom layer, so it belongs beside `infrastructure/ui.ts`. One line in `components.json`, and every later `shadcn add` lands in the right place.
+
+Two edits to the generated popover, both recorded in the file: the `tw-animate-css` utilities were removed because this project does not install that package, so every one of them styled nothing, and the unused parts (`Anchor`, `Header`, `Title`, `Description`) were dropped rather than kept as dead exports.
+
+_Correction, found by building it._ **The plan said the "Add model" trigger is disabled at three, and that is wrong.** Disabling it makes the only route into the list unavailable exactly when somebody wants to swap a model, so the only way to change your mind is to delete a chip first, blind, before seeing what you would replace it with. The trigger stays operable and changes verb to "Change models"; the refusal moved inside the panel, onto the individual rows, where it can be specific. Same shape at the floor: with one model selected, that row is the locked one and the footer says why.
+
+_Correction, found by looking at the served HTML rather than the source._ A summary line read **"1Mwidest window"** in the browser while looking perfectly correct in the JSX. A JSX text node that wraps across lines has its line-leading whitespace stripped, so the space between an expression and the text after it disappeared when Prettier wrapped the line. It is now one template string, with a comment saying why, because this will happen again to the next person who wraps a line of interpolated prose.
+
+#### Verified against the live catalog
+
+Confirmed on 2 August 2026 against a running dev server and the real OpenRouter endpoint. `castVote`'s pattern was reused for the parts `curl` cannot reach: a throwaway probe route, driven, then deleted.
+
+- `/models` renders **14 rows**, all `:free`, sorted largest window first, from Nemotron 3 Ultra at **1M** down to three models at **128K**. Bars are drawn to scale, 100% down to 12.8%, which is the eight-to-one spread the table exists to show.
+- The default trio is three genuinely different vendors: **NVIDIA, Google, Poolside**. The arena's chips render those same three, and the picker trigger correctly reads "Change models" rather than "Add model" at the cap.
+- **The parser drops exactly the right rows and keeps the rest.** Fed a payload containing a row missing `context_length`, a bare string, a genuinely paid model, and one claiming `:free` while charging for input, it returned only the two real models. Malformed input at the top level returns `null` instead of throwing. The `:free`-but-charging case is the one that matters: the id suffix alone would have let it through.
+- **The paid-model hole is closed.** `anthropic/claude-opus-5`, a made-up id and an empty id are all refused; a real free id is allowed.
+- **A dead catalog degrades honestly, checked by actually breaking it.** With the URL pointed at an unreachable host, `/models` shows "The catalog didn't answer just now, so there is nothing to list. Nothing else in the arena is affected." with a retry, the arena shows "The model list isn't loading, so there's nothing to send to yet." with a retry and a disabled send button, and the real `TypeError: fetch failed` appears only in the server log. The URL was restored and both pages recovered.
+- All five routes still return 200.
+
+- [x] Decide the approach
+- [x] `infrastructure/model-catalog.ts`: fetched, zod-parsed, cached, sorted, with the default-trio rule
+- [x] `/models` renders the live catalog; `placeholder-catalog.ts` deleted
+- [x] shadcn popover added; the "Add model" picker built in `features/arena/`
+- [x] Chips wired to real selection state: cap at three, floor at one, removable
+- [x] `POST /api/chat` rejects a model that is not on the free list
+- [x] Verified: the live list renders, the default trio is three distinct providers, the cap and the floor both hold
+- [x] Verified: a failed catalog fetch shows a plain sentence and a retry, never a raw error
+- [x] Typecheck, lint, `format:check` and a real production build all pass
+- [ ] **Needs a person:** keyboard only, open the picker, toggle a model, Escape to close, Tab to a chip's remove button. Confirm the focus ring is visible on the rows inside the scrolling panel, in both themes.
 
 ### 6. Send a prompt, parallel streams, and voting
 
@@ -289,7 +351,7 @@ Arcjet shipped early, on its own, because the endpoint it guards already existed
 
 **`POST /api/chat` now requires sign-in.** No Clerk `userId` means a 401 before Arcjet is called at all, which also means an unauthenticated request never costs a decision. _This contradicts feature 1, which parked route gating in feature 8, and the contradiction is resolved here rather than worked around:_ the rate limit has no honest identity without an authenticated user, and IP keying would have quietly broken the "one person" promise above the moment two people shared a NAT. Feature 8 still owns page visibility and public thread sharing. The cost, accepted deliberately: nobody can try the arena without an account, so there is no signed-out demo.
 
-**The guard runs before the body is parsed.** Nothing in it needs the body, and this ordering means malformed-body spam still spends a token instead of being a free way to hammer the endpoint.
+**The guard runs before the body is parsed.** Nothing in it needs the body, and this ordering means malformed-body spam still spends a token instead of being a free way to hammer the endpoint. _Added by feature 5:_ once the body is parsed, the route also refuses any `modelId` that is not on the live free-tier list, and fails closed if that list cannot be read.
 
 **Bots are denied outright, `allow: []`.** This endpoint is only ever called by our own browser code. No crawler, monitor, or search engine has a reason to reach it, and everything it lets through spends real inference.
 
@@ -306,6 +368,38 @@ Denials never leak an Arcjet reason: 429 with a real retry-after for the bucket,
 - [x] Typecheck, lint and production build all pass
 - [ ] **Needs a paid add-on:** prompt injection detection, see the correction above
 - [ ] Build the rest of the feature: parallel streams, the response cards, and voting
+
+#### Decided: how the rest of this feature is built
+
+**User provisioning is a lazy find-or-create by Clerk `userId`, not a webhook.** Nothing in the schema needs anything more than a `users` row to exist by the time a turn is written, and a webhook is a second endpoint and a secret to manage for a guarantee this already gets for free from the write path below.
+
+**Sending a prompt is two steps, in this order: create the durable record, then stream.** A server action opens one transaction that resolves/creates the `User`, creates (or reuses) the `Thread`, creates the `Turn` (the prompt), and creates one `ModelResponse` row per selected model at `STREAMING`. It returns the thread id and each response's id. Only once that comes back does the browser navigate to `/t/[threadId]` and open the model streams. _Asked, because it forks:_ streaming immediately and relocating the URL underneath the in-flight requests would shave the wait for a first token, but risks a stream dying on a client-side route swap for a saving that isn't worth that fragility yet. From a saved thread, sending a follow-up skips the navigation, everything else is identical.
+
+**Each selected model gets its own `fetch` to `POST /api/chat`, in parallel, and the client parses the stream itself with `ai`'s `readUIMessageStream` rather than `@ai-sdk/react`'s `useChat`.** Three independent per-model conversations, each with its own measured metrics riding in message metadata, don't fit `useChat`'s single-conversation model any better than what's already hand-rolled in `model-response-metrics.ts`, and pulling in a second AI SDK entry point for one hook isn't worth it.
+
+**A thread's models are locked at turn one.** Once a thread exists, the model picker in its composer goes away (or read-only); a follow-up always addresses the same models the thread started with. _Asked, because it forks:_ letting the set change per turn is more flexible but leaves a thread with responses scattered unevenly across models and turns, and "a follow-up continues each model's own separate conversation" reads most literally as one fixed cast for the thread's life.
+
+**Persistence happens server-side, inside the route, not from the client after the stream ends.** `stream-model-response.ts` already builds the exact `ModelResponseMetrics` object at finish; that same object is written into the `ModelResponse` row at that moment (upsert on the existing `@@unique([turnId, modelId])`, which is also what makes an in-place retry of a failed model overwrite its row instead of adding a second one). `FAILED` is written from the same `onError` path that already returns the user-facing sentence. An answer survives a closed tab this way; a client-reported "I finished" would not.
+
+**Follow-up history is rebuilt per model, not shared across models.** Each model's message list is that thread's turns in order: every prompt, plus that model's own prior answer wherever it completed. One model never sees another model's text.
+
+**Voting is a thin server action wrapping the existing `castVote`**, wired straight to the "Pick this" buttons already in the placeholder UI, mapping each `VoteRefusal` to the plain sentence a caller already expects.
+
+**PostHog gets a lazy server client, mirroring `infrastructure/arcjet.ts`'s pattern**, firing `prompt_sent` / `model_answered` / `vote_cast` as the funnel scope.md calls for. `@posthog/ai`'s own per-call capture is done by calling `captureAiGeneration` directly rather than `withTracing`-wrapping the model — _correction, found by building it:_ `withTracing` types its model parameter against the AI SDK's older `LanguageModelV2`/`V3`, and `@openrouter/ai-sdk-provider` has already moved to `V4`, so wrapping does not typecheck. Calling `captureAiGeneration` by hand sidesteps the mismatch and reuses the exact same measured numbers already going into `metrics`.
+
+**One more correction, found by building it:** three-model turns turned out to need one more piece than planned — the thread page (`/t/[threadId]`) has to load a thread's real turns from the database, not just its id. The chosen sequencing (create the turn, then navigate, then stream) means the destination page is the first thing that ever sees a turn's `STREAMING` rows, so without a real loader there the prompt just sent would render into an empty screen. This is a minimal turn loader only — the actual sidebar and cross-thread history stays feature 7's job.
+
+- [x] User find-or-create by `clerkId` (`infrastructure/current-user.ts`)
+- [x] `start-turn` server action: thread + turn + STREAMING response rows in one transaction (`features/arena/start-turn.ts`)
+- [x] New-thread composer: create-then-navigate-then-stream
+- [x] Existing-thread composer: send skips navigation, model picker locked/hidden
+- [x] Per-model `fetch` + `readUIMessageStream` client parsing, replacing the placeholder columns (`features/arena/stream-model-answer.ts`)
+- [x] Server-side persistence of COMPLETE/FAILED + metrics inside `stream-model-response.ts`
+- [x] Per-model message history reconstruction for follow-ups (`features/arena/model-messages.ts`)
+- [x] `cast-vote` server action wired to the response cards (`features/voting/cast-vote-action.ts`)
+- [x] PostHog server client + funnel events + `@posthog/ai` call wrapping (`infrastructure/posthog.ts`, `infrastructure/analytics-events.ts`)
+- [ ] Verified end to end: a real prompt, three real streams, one real failure recovering with "Try again", a real vote, a real follow-up — **not yet done, the user is testing this by hand**
+- [x] Typecheck, lint, and production build all pass
 
 ## Slice 2: App shell & thread history
 

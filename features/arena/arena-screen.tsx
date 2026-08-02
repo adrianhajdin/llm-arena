@@ -1,27 +1,36 @@
+"use client";
+
+import { useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
+
+import { type CatalogModel } from "@/infrastructure/model-catalog";
 import { cn } from "@/infrastructure/ui";
 
+import { Composer } from "./composer";
 import { InstrumentStrip } from "./instrument-strip";
-import {
-  PLACEHOLDER_PROMPT,
-  PLACEHOLDER_RESPONSES,
-  type PlaceholderResponse,
-} from "./placeholder-turn";
+import { buildModelMessages } from "./model-messages";
+import { startTurn } from "./start-turn";
+import { streamModelAnswer } from "./stream-model-answer";
+import type { ResponseState, TurnState } from "./turn-state";
 
 /**
- * PLACEHOLDER SCREEN — the frame is real, everything inside it is not. Feature 5
- * replaces the model chips with the live catalog, feature 6 replaces the columns
- * with real streams and makes the composer and the vote buttons work.
+ * The real arena: one prompt fanned out to every selected model, each
+ * streaming and failing on its own request, voted on once two or more have
+ * answered.
+ *
+ * State lives here, not in the composer, because a turn outlives the input
+ * that created it. The one subtlety is how a brand-new thread gets its first
+ * turn onto the screen: `startTurn` returns before any model has been called,
+ * this component navigates to `/t/[threadId]`, and the destination page loads
+ * that turn's `STREAMING` rows straight from the database. The effect below,
+ * which opens a stream for every `STREAMING` response, then fires on that
+ * fresh page exactly the same way it fires for an in-place follow-up — one
+ * mechanism for both, the database is the hand-off.
  *
  * The columns share one bordered container with rules between them rather than
  * floating as three separate cards, because three answers to one prompt are one
  * comparison, not three unrelated things.
- *
- * Metrics sit open under every answer instead of behind the sketch's toggle.
- * The measured numbers are the reason this product exists, and hiding the best
- * thing on the screen behind a disclosure was the wrong read of that sketch.
  */
-
-const SELECTED_MODELS = ["Phi 4 Reasoning", "Qwen 3 Coder", "Nemotron 3 Ultra"] as const;
 
 const WinnerBadge = () => (
   <span className="bg-winner/15 text-winner inline-flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium">
@@ -32,7 +41,21 @@ const WinnerBadge = () => (
   </span>
 );
 
-const ResponseColumn = ({ response }: { readonly response: PlaceholderResponse }) => (
+type ResponseColumnProps = {
+  readonly response: ResponseState;
+  readonly canVote: boolean;
+  readonly voting: boolean;
+  readonly onVote: () => void;
+  readonly onRetry: () => void;
+};
+
+const ResponseColumn = ({
+  response,
+  canVote,
+  voting,
+  onVote,
+  onRetry,
+}: ResponseColumnProps) => (
   <article className="border-border flex min-w-0 flex-col border-b last:border-b-0 lg:border-r lg:border-b-0 lg:last:border-r-0">
     <header className="flex items-center justify-between gap-2 px-4 py-3">
       <div className="flex min-w-0 items-center gap-2">
@@ -47,18 +70,18 @@ const ResponseColumn = ({ response }: { readonly response: PlaceholderResponse }
       {response.won ? (
         <WinnerBadge />
       ) : (
-        <button
-          type="button"
-          disabled={response.status === "FAILED"}
-          className={cn(
-            "shrink-0 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors",
-            response.status === "FAILED"
-              ? "border-border text-muted-foreground opacity-50"
-              : "border-input hover:bg-muted",
-          )}
-        >
-          Pick this
-        </button>
+        canVote && (
+          <button
+            type="button"
+            disabled={voting}
+            onClick={onVote}
+            className={cn(
+              "border-input hover:bg-muted shrink-0 rounded-full border px-2.5 py-1 text-xs font-medium transition-colors disabled:opacity-50",
+            )}
+          >
+            Pick this
+          </button>
+        )
       )}
     </header>
 
@@ -81,11 +104,14 @@ const ResponseColumn = ({ response }: { readonly response: PlaceholderResponse }
           </p>
           <button
             type="button"
+            onClick={onRetry}
             className="border-input hover:bg-muted mt-3 rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors"
           >
             Try again
           </button>
         </div>
+      ) : response.status === "STREAMING" && response.text.length === 0 ? (
+        <p className="text-muted-foreground text-sm">Thinking…</p>
       ) : (
         <div className="flex flex-col gap-3 text-[15px] leading-relaxed">
           {/* Paragraphs are appended in order and never reordered, and two of
@@ -98,122 +124,234 @@ const ResponseColumn = ({ response }: { readonly response: PlaceholderResponse }
       )}
     </div>
 
-    {response.status === "COMPLETE" && (
+    {response.status === "COMPLETE" && response.metrics && (
       <div className="border-border bg-background/40 border-t px-4 py-2.5">
-        <InstrumentStrip />
+        <InstrumentStrip metrics={response.metrics} />
       </div>
     )}
   </article>
 );
 
-const Composer = () => (
-  <div className="bg-background/85 sticky bottom-0 px-4 pt-2 pb-4 backdrop-blur-sm sm:px-6">
-    <div className="surface mx-auto max-w-5xl p-3">
-      <label htmlFor="prompt" className="sr-only">
-        Your prompt
-      </label>
-      <textarea
-        id="prompt"
-        rows={2}
-        placeholder="Ask anything. Enter to send, shift + enter for a new line."
-        className="placeholder:text-muted-foreground w-full resize-none bg-transparent px-1 py-1 text-[15px] leading-relaxed outline-none"
-      />
-      <div className="mt-2 flex items-end justify-between gap-3">
-        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-          {SELECTED_MODELS.map((model) => (
-            <span
-              key={model}
-              className="border-border text-muted-foreground inline-flex items-center gap-1.5 rounded-full border py-1 pr-1.5 pl-2.5 text-xs"
-            >
-              {model}
-              <button
-                type="button"
-                className="hover:text-foreground rounded-full p-0.5 transition-colors"
-                aria-label={`Remove ${model}`}
-              >
-                <svg
-                  viewBox="0 0 24 24"
-                  className="size-3"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2.5"
-                  strokeLinecap="round"
-                  aria-hidden
-                >
-                  <path d="m6 6 12 12M18 6 6 18" />
-                </svg>
-              </button>
-            </span>
-          ))}
-          <button
-            type="button"
-            className="border-input hover:bg-muted rounded-full border px-2.5 py-1 text-xs font-medium transition-colors"
-          >
-            Add model
-          </button>
-        </div>
-        <button
-          type="button"
-          className="bg-primary text-primary-foreground hover:bg-primary/90 flex size-9 shrink-0 items-center justify-center rounded-lg transition-colors"
-          aria-label="Send prompt"
-        >
-          <svg
-            viewBox="0 0 24 24"
-            className="size-4"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            aria-hidden
-          >
-            <path d="M12 19V5M5 12l7-7 7 7" />
-          </svg>
-        </button>
-      </div>
-    </div>
-    <p className="text-muted-foreground mx-auto mt-2 max-w-5xl text-center text-xs">
-      Up to three models at a time. Every one of them is free.
-    </p>
-  </div>
-);
+type LockedModel = Readonly<{ id: string; name: string }>;
 
-export const ArenaScreen = ({ withTurn = false }: { readonly withTurn?: boolean }) => (
-  <div className="flex min-h-full flex-col">
-    <div className="flex-1 px-4 py-6 sm:px-6">
-      {withTurn ? (
-        <div className="mx-auto flex max-w-5xl flex-col gap-5">
-          <div className="flex justify-end">
-            <p className="bg-muted max-w-xl rounded-2xl rounded-br-md px-4 py-2.5 text-[15px] leading-relaxed">
-              {PLACEHOLDER_PROMPT}
+/**
+ * Casting a vote is `features/voting`'s own logic, so this component never
+ * imports it directly — a feature may not reach into another one. The route
+ * composes the two: it imports `castVoteAction` and hands it down here.
+ */
+type CastVote = (input: {
+  readonly turnId: string;
+  readonly modelResponseId: string;
+}) => Promise<{ readonly ok: boolean; readonly error?: string }>;
+
+type ArenaScreenProps = {
+  readonly catalog: readonly CatalogModel[] | null;
+  readonly defaultSelection: readonly string[];
+  readonly onCastVote: CastVote;
+  /** `null` for a brand-new thread; the thread's own id otherwise. */
+  readonly threadId?: string | null;
+  /** Turns already saved for this thread, in order. Empty for a new arena. */
+  readonly initialTurns?: readonly TurnState[];
+  /** This thread's fixed models, derived from its own first turn. */
+  readonly lockedModels?: readonly LockedModel[] | null;
+};
+
+export const ArenaScreen = ({
+  catalog,
+  defaultSelection,
+  onCastVote,
+  threadId = null,
+  initialTurns = [],
+  lockedModels = null,
+}: ArenaScreenProps) => {
+  const router = useRouter();
+  const [turns, setTurns] = useState<readonly TurnState[]>(initialTurns);
+  const [pending, setPending] = useState(false);
+  const [votingTurnId, setVotingTurnId] = useState<string | null>(null);
+  const [sendError, setSendError] = useState<string | null>(null);
+  const inFlight = useRef<Set<string>>(new Set());
+
+  const updateResponse = (
+    turnId: string,
+    responseId: string,
+    patch: Partial<ResponseState>,
+  ) =>
+    setTurns((current) =>
+      current.map((turn) =>
+        turn.id !== turnId
+          ? turn
+          : {
+              ...turn,
+              responses: turn.responses.map((response) =>
+                response.id !== responseId ? response : { ...response, ...patch },
+              ),
+            },
+      ),
+    );
+
+  useEffect(() => {
+    turns.forEach((turn, turnIndex) => {
+      turn.responses.forEach((response) => {
+        if (response.status !== "STREAMING") return;
+        if (inFlight.current.has(response.id)) return;
+
+        inFlight.current.add(response.id);
+
+        const messages = buildModelMessages(turns, turnIndex, response.modelId);
+
+        streamModelAnswer({
+          modelId: response.modelId,
+          turnId: turn.id,
+          messages,
+          onTextUpdate: (text) => updateResponse(turn.id, response.id, { text }),
+          onDone: (status) => {
+            updateResponse(turn.id, response.id, { status });
+            inFlight.current.delete(response.id);
+          },
+        });
+      });
+    });
+  }, [turns]);
+
+  const handleSend = async (prompt: string, models: readonly LockedModel[]) => {
+    setPending(true);
+    setSendError(null);
+
+    const result = await startTurn({ threadId, prompt, models });
+
+    setPending(false);
+
+    if (!result.ok) {
+      setSendError(result.error);
+      return;
+    }
+
+    if (threadId === null) {
+      router.push(`/t/${result.threadId}`);
+      return;
+    }
+
+    setTurns((current) => [
+      ...current,
+      {
+        id: result.turnId,
+        prompt,
+        responses: result.responses.map((response) => ({
+          id: response.id,
+          modelId: response.modelId,
+          modelName: response.modelName,
+          status: "STREAMING" as const,
+          text: "",
+          metrics: null,
+          won: false,
+        })),
+      },
+    ]);
+  };
+
+  const handleVote = async (turnId: string, modelResponseId: string) => {
+    setVotingTurnId(turnId);
+    setSendError(null);
+
+    const result = await onCastVote({ turnId, modelResponseId });
+
+    setVotingTurnId(null);
+
+    if (!result.ok) {
+      setSendError(result.error ?? "That vote didn't go through. Try again.");
+      return;
+    }
+
+    setTurns((current) =>
+      current.map((turn) =>
+        turn.id !== turnId
+          ? turn
+          : {
+              ...turn,
+              responses: turn.responses.map((response) => ({
+                ...response,
+                won: response.id === modelResponseId,
+              })),
+            },
+      ),
+    );
+  };
+
+  const handleRetry = (turnId: string, responseId: string) => {
+    inFlight.current.delete(responseId);
+    updateResponse(turnId, responseId, { status: "STREAMING", text: "" });
+  };
+
+  return (
+    <div className="flex min-h-full flex-col">
+      <div className="flex-1 px-4 py-6 sm:px-6">
+        {turns.length > 0 ? (
+          <div className="mx-auto flex max-w-5xl flex-col gap-5">
+            {turns.map((turn) => {
+              const completeCount = turn.responses.filter(
+                (response) => response.status === "COMPLETE",
+              ).length;
+              const hasVote = turn.responses.some((response) => response.won);
+              const canVote = completeCount >= 2 && !hasVote;
+
+              return (
+                <div key={turn.id} className="flex flex-col gap-5">
+                  <div className="flex justify-end">
+                    <p className="bg-muted max-w-xl rounded-2xl rounded-br-md px-4 py-2.5 text-[15px] leading-relaxed">
+                      {turn.prompt}
+                    </p>
+                  </div>
+
+                  <div className="surface overflow-hidden">
+                    <div className="grid grid-cols-1 lg:grid-cols-3">
+                      {turn.responses.map((response) => (
+                        <ResponseColumn
+                          key={response.id}
+                          response={response}
+                          canVote={canVote}
+                          voting={votingTurnId === turn.id}
+                          onVote={() => handleVote(turn.id, response.id)}
+                          onRetry={() => handleRetry(turn.id, response.id)}
+                        />
+                      ))}
+                    </div>
+                  </div>
+
+                  {canVote && (
+                    <p className="text-muted-foreground text-center text-sm">
+                      Two or more models answered, so this turn can be voted on. Picking
+                      one marks it the winner and leaves every answer on screen.
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="mx-auto flex max-w-xl flex-col items-center py-20 text-center">
+            <h1 className="text-display">Ask three models at once</h1>
+            <p className="text-muted-foreground mt-3 text-[15px] leading-relaxed">
+              One prompt goes to every model you pick. They answer side by side, each with
+              its own real speed and token count, and you decide which one was actually
+              worth it.
             </p>
           </div>
+        )}
 
-          <div className="surface overflow-hidden">
-            <div className="grid grid-cols-1 lg:grid-cols-3">
-              {PLACEHOLDER_RESPONSES.map((response) => (
-                <ResponseColumn key={response.modelId} response={response} />
-              ))}
-            </div>
-          </div>
+        {sendError && (
+          <p className="text-destructive mx-auto mt-4 max-w-5xl text-center text-sm">
+            {sendError}
+          </p>
+        )}
+      </div>
 
-          <p className="text-muted-foreground text-center text-sm">
-            Two models answered, so this turn can be voted on. Picking one marks it the
-            winner and leaves every answer on screen.
-          </p>
-        </div>
-      ) : (
-        <div className="mx-auto flex max-w-xl flex-col items-center py-20 text-center">
-          <h1 className="text-display">Ask three models at once</h1>
-          <p className="text-muted-foreground mt-3 text-[15px] leading-relaxed">
-            One prompt goes to every model you pick. They answer side by side, each with
-            its own real speed and token count, and you decide which one was actually
-            worth it.
-          </p>
-        </div>
-      )}
+      <Composer
+        catalog={catalog}
+        defaultSelection={defaultSelection}
+        locked={lockedModels}
+        disabled={pending}
+        onSend={handleSend}
+      />
     </div>
-
-    <Composer />
-  </div>
-);
+  );
+};

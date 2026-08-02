@@ -1,64 +1,150 @@
-import { PLACEHOLDER_CATALOG } from "./placeholder-catalog";
+import {
+  MAX_SELECTED_MODELS,
+  formatContextWindow,
+  type CatalogModel,
+} from "@/infrastructure/model-catalog";
 
 /**
- * PLACEHOLDER SCREEN — feature 5 replaces the cards with the live free-tier
- * catalog from OpenRouter and makes this the browsable version of what the
- * "Add model" popover shows.
+ * The live free-tier catalog, as something you read rather than something you
+ * pick from. The picker in the arena is the other half of this.
  *
- * Context window is written in thousands rather than as a raw token count,
- * because "262K" is a size somebody can hold in their head and "262144" is a
- * number they have to parse first. Price reads $0.0000 rather than the word
- * "Free", so it sits in the same mono column as every other measured figure.
+ * It is a table and not the card grid this screen started as, because the one
+ * fact that actually separates these models is the context window and it spans
+ * nearly eight to one across the list. A grid of equal cards throws that away:
+ * every card looks the same size whether the model holds a million tokens or a
+ * hundred and twenty-eight thousand. Sorted rows with the window drawn to
+ * scale make the shape of the free tier the thing you see first, which is one
+ * enormous model and then a pack.
+ *
+ * The bar is grey, not rust. Rust means "you can operate this" everywhere else
+ * in the app, and spending it on a specification you can only read would make
+ * the accent mean less on every other screen.
  */
 
-const formatContext = (tokens: number) => `${Math.round(tokens / 1024)}K`;
+type ModelsScreenProps = {
+  readonly catalog: readonly CatalogModel[] | null;
+  readonly defaultSelection: readonly string[];
+};
 
-export const ModelsScreen = () => (
-  <div className="mx-auto w-full max-w-5xl px-4 py-10 sm:px-6">
-    <h1 className="text-display">Models</h1>
-    <p className="text-muted-foreground mt-2 max-w-xl text-[15px] leading-relaxed">
-      Every model the arena can reach. All of them are free tier, which is the whole
-      reason you can put three of them against each other without thinking about it.
+const CatalogUnavailable = () => (
+  <>
+    <p className="text-muted-foreground mt-3 max-w-xl text-[15px] leading-relaxed">
+      The catalog didn&rsquo;t answer just now, so there is nothing to list. Nothing else
+      in the arena is affected.
     </p>
-
-    <div className="mt-8 grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-      {PLACEHOLDER_CATALOG.map((model) => (
-        <article key={model.id} className="surface flex flex-col p-4">
-          <div className="flex items-center gap-2.5">
-            <span
-              className="border-input text-muted-foreground flex size-8 shrink-0 items-center justify-center rounded-full border font-mono text-xs"
-              aria-hidden
-            >
-              {model.provider.slice(0, 1)}
-            </span>
-            <div className="min-w-0">
-              <h2 className="font-display truncate text-lg leading-tight">
-                {model.name}
-              </h2>
-              <p className="text-muted-foreground truncate text-xs">{model.provider}</p>
-            </div>
-          </div>
-
-          <dl className="border-border mt-4 flex flex-col gap-1.5 border-t pt-3">
-            <div className="flex items-baseline justify-between gap-3">
-              <dt className="metric">context</dt>
-              <dd className="metric metric-value">
-                {formatContext(model.contextTokens)}
-              </dd>
-            </div>
-            <div className="flex items-baseline justify-between gap-3">
-              <dt className="metric">price per call</dt>
-              <dd className="metric metric-value">$0.0000</dd>
-            </div>
-            <div className="flex items-baseline justify-between gap-3">
-              <dt className="metric">id</dt>
-              <dd className="metric metric-value max-w-44 truncate" title={model.id}>
-                {model.id}
-              </dd>
-            </div>
-          </dl>
-        </article>
-      ))}
-    </div>
-  </div>
+    <a
+      href="/models"
+      className="border-input hover:bg-muted mt-5 inline-block rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors"
+    >
+      Try again
+    </a>
+  </>
 );
+
+export const ModelsScreen = ({ catalog, defaultSelection }: ModelsScreenProps) => {
+  const widestWindow = catalog?.[0]?.contextTokens ?? 1;
+
+  return (
+    <div className="mx-auto w-full max-w-4xl px-4 py-10 sm:px-6">
+      <h1 className="text-display">Models</h1>
+
+      {!catalog ? (
+        <CatalogUnavailable />
+      ) : (
+        <>
+          <p className="text-muted-foreground mt-3 max-w-xl text-[15px] leading-relaxed">
+            Every model the arena can reach, largest context window first. All of them are
+            free, which is the whole reason you can put three against each other without
+            thinking about it. The {MAX_SELECTED_MODELS} marked{" "}
+            <span className="text-foreground">default</span> open a new round: the widest
+            window from each of three different vendors.
+          </p>
+
+          {/* One string rather than interleaved JSX text: a multi-line JSX text
+              node has its line-leading whitespace stripped, which silently
+              rendered this as "1Mwidest window" the first time it was built. */}
+          <p className="metric metric-value mt-5">
+            {`${catalog.length} models · ${formatContextWindow(widestWindow)} widest window · $0.0000 each`}
+          </p>
+
+          <div className="surface mt-6 overflow-hidden">
+            <table className="w-full text-left">
+              <caption className="sr-only">
+                Free-tier models available in the arena, sorted by context window, largest
+                first.
+              </caption>
+              <thead>
+                <tr className="border-border border-b">
+                  <th scope="col" className="text-eyebrow px-4 py-2.5 font-medium">
+                    Model
+                  </th>
+                  <th
+                    scope="col"
+                    className="text-eyebrow hidden px-4 py-2.5 text-right font-medium sm:table-cell"
+                  >
+                    Per call
+                  </th>
+                  <th
+                    scope="col"
+                    className="text-eyebrow w-32 px-4 py-2.5 text-right font-medium sm:w-48"
+                  >
+                    Context
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {catalog.map((model) => (
+                  <tr key={model.id} className="border-border border-b last:border-b-0">
+                    <th scope="row" className="px-4 py-3.5 font-normal">
+                      <span className="flex min-w-0 items-center gap-3">
+                        <span
+                          className="border-input text-muted-foreground flex size-8 shrink-0 items-center justify-center rounded-full border font-mono text-xs"
+                          aria-hidden
+                        >
+                          {model.provider.slice(0, 1).toUpperCase()}
+                        </span>
+                        <span className="min-w-0">
+                          <span className="flex items-center gap-2">
+                            <span className="font-display truncate text-lg leading-tight">
+                              {model.name}
+                            </span>
+                            {defaultSelection.includes(model.id) && (
+                              <span className="border-border text-muted-foreground shrink-0 rounded-full border px-1.5 py-px text-[10px] font-medium tracking-[0.08em] uppercase">
+                                default
+                              </span>
+                            )}
+                          </span>
+                          <span className="text-muted-foreground block truncate text-xs">
+                            {model.provider}{" "}
+                            <span className="font-mono">&middot; {model.id}</span>
+                          </span>
+                        </span>
+                      </span>
+                    </th>
+
+                    <td className="metric metric-value hidden px-4 py-3.5 text-right align-middle sm:table-cell">
+                      $0.0000
+                    </td>
+
+                    <td className="px-4 py-3.5 align-middle">
+                      <span className="metric metric-value block text-right">
+                        {formatContextWindow(model.contextTokens)}
+                      </span>
+                      <span className="measure-bar mt-2 block" aria-hidden>
+                        <span
+                          style={{
+                            width: `${(model.contextTokens / widestWindow) * 100}%`,
+                          }}
+                        />
+                      </span>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
+    </div>
+  );
+};
