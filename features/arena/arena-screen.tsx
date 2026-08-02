@@ -199,6 +199,13 @@ export const ArenaScreen = ({
     );
 
   useEffect(() => {
+    // A non-owner never opened a stream, so they must never try to advance
+    // one either: their own `/api/chat` call would be refused by the same
+    // server-side check that already gates `startTurn` and `castVote`, and
+    // that refusal would flip a genuinely in-progress answer to `FAILED` on
+    // their screen for no reason but that they opened the link.
+    if (!isOwner) return;
+
     turns.forEach((turn, turnIndex) => {
       turn.responses.forEach((response) => {
         if (response.status !== "STREAMING") return;
@@ -220,7 +227,7 @@ export const ArenaScreen = ({
         });
       });
     });
-  }, [turns]);
+  }, [turns, isOwner]);
 
   const handleSend = async (prompt: string, models: readonly LockedModel[]) => {
     setPending(true);
