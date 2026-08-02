@@ -154,6 +154,14 @@ type ArenaScreenProps = {
   readonly initialTurns?: readonly TurnState[];
   /** This thread's fixed models, derived from its own first turn. */
   readonly lockedModels?: readonly LockedModel[] | null;
+  /**
+   * Whether the person looking at this screen is the thread's real owner.
+   * Always `true` for a brand-new thread, since whoever starts one is
+   * inherently its owner. `false` hides the composer and every vote button —
+   * `startTurn` and `castVote` already refuse a non-owner server-side, this
+   * just agrees with that up front instead of letting a visitor try and fail.
+   */
+  readonly isOwner?: boolean;
 };
 
 export const ArenaScreen = ({
@@ -163,6 +171,7 @@ export const ArenaScreen = ({
   threadId = null,
   initialTurns = [],
   lockedModels = null,
+  isOwner = true,
 }: ArenaScreenProps) => {
   const router = useRouter();
   const [turns, setTurns] = useState<readonly TurnState[]>(initialTurns);
@@ -301,7 +310,7 @@ export const ArenaScreen = ({
                 (response) => response.status === "COMPLETE",
               ).length;
               const hasVote = turn.responses.some((response) => response.won);
-              const canVote = completeCount >= 2 && !hasVote;
+              const canVote = isOwner && completeCount >= 2 && !hasVote;
 
               return (
                 <div key={turn.id} className="flex flex-col gap-5">
@@ -354,13 +363,20 @@ export const ArenaScreen = ({
         )}
       </div>
 
-      <Composer
-        catalog={catalog}
-        defaultSelection={defaultSelection}
-        locked={lockedModels}
-        disabled={pending}
-        onSend={handleSend}
-      />
+      {isOwner ? (
+        <Composer
+          catalog={catalog}
+          defaultSelection={defaultSelection}
+          locked={lockedModels}
+          disabled={pending}
+          onSend={handleSend}
+        />
+      ) : (
+        <p className="text-muted-foreground border-border border-t px-4 py-4 text-center text-sm sm:px-6">
+          You&rsquo;re viewing someone else&rsquo;s thread. Only its owner can add to it
+          or vote.
+        </p>
+      )}
     </div>
   );
 };

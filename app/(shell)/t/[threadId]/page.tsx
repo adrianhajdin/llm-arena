@@ -1,19 +1,23 @@
+import { auth } from "@clerk/nextjs/server";
 import { notFound } from "next/navigation";
 
 import type { ResponseState, TurnState } from "@/features/arena/turn-state";
 import { ArenaScreen } from "@/features/arena/arena-screen";
 import { castVoteAction } from "@/features/voting/cast-vote-action";
 import { database } from "@/infrastructure/database";
+import { findAppUserId } from "@/infrastructure/current-user";
 import { fetchFreeModelCatalog } from "@/infrastructure/fetch-model-catalog";
 import { defaultModelSelection } from "@/infrastructure/model-catalog";
 
 /**
- * A saved thread, and the URL feature 8 shares. Who is allowed to see it is
- * still feature 8's decision — this loads the thread's real turns regardless
- * of who is asking, which is the minimum feature 6 needs: a prompt sent from
- * the empty arena navigates here immediately, before any model has answered,
- * so this is also where those first `STREAMING` rows are actually seen for
- * the first time.
+ * A saved thread, and the URL feature 8 shares. Anyone can open this link and
+ * see the thread, signed in or not: `notFound()` is the only gate, and it
+ * fires the same way for a made-up id, a deleted thread, or someone else's
+ * thread, since a thread that exists is never a secret. Only the owner can
+ * actually use it, which `isOwner` below carries down to the screen so the
+ * composer and the vote buttons only ever render for them; `startTurn` and
+ * `castVote` already refuse anyone else server-side, this is just the UI
+ * agreeing with that up front rather than letting a visitor try and fail.
  *
  * A thread's models are fixed at turn one (docs/scope.md, feature 6), read
  * back here from its own first turn rather than the catalog's default trio.
@@ -30,6 +34,7 @@ export default async function ThreadPage({
     where: { id: threadId },
     select: {
       id: true,
+      userId: true,
       turns: {
         orderBy: { createdAt: "asc" },
         select: {
@@ -57,6 +62,10 @@ export default async function ThreadPage({
   });
 
   if (!thread) notFound();
+
+  const { userId: clerkId } = await auth();
+  const viewerId = clerkId ? await findAppUserId(clerkId) : null;
+  const isOwner = viewerId !== null && viewerId === thread.userId;
 
   const initialTurns: readonly TurnState[] = thread.turns.map((turn) => ({
     id: turn.id,
@@ -99,6 +108,7 @@ export default async function ThreadPage({
       threadId={thread.id}
       initialTurns={initialTurns}
       lockedModels={lockedModels}
+      isOwner={isOwner}
     />
   );
 }
