@@ -1,3 +1,5 @@
+import type { UIMessage } from "ai";
+
 /**
  * The real, measured numbers for a single model's answer.
  *
@@ -20,6 +22,14 @@ export type ModelResponseMetrics = Readonly<{
    */
   costUsd: number;
 }>;
+
+/**
+ * The message shape the browser receives, carrying the measured metrics as
+ * message metadata on the final chunk. Shared with `features/arena`, which
+ * parses this same shape back out of the stream, hence living here rather
+ * than inside `features/chat`.
+ */
+export type ChatUIMessage = UIMessage<ModelResponseMetrics>;
 
 type UsageSnapshot = Readonly<{
   inputTokens: number | undefined;

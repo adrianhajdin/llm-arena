@@ -9,6 +9,8 @@ import { z } from "zod";
  */
 export const chatRequestSchema = z.object({
   modelId: z.string().min(1).max(200),
+  /** The turn this call's answer belongs to, already created by `startTurn`. */
+  turnId: z.string().min(1),
   messages: z
     .array(
       z.object({

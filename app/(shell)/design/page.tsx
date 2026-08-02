@@ -147,7 +147,17 @@ export default function StyleProof() {
               because the text arriving is already the thing worth watching.
             </p>
             <div className="border-border bg-background/40 border-t px-4 py-3">
-              <InstrumentStrip />
+              <InstrumentStrip
+                metrics={{
+                  modelId: "design-proof",
+                  timeToFirstTokenMs: 982,
+                  tokensPerSecond: 18.71,
+                  inputTokens: 42,
+                  outputTokens: 397,
+                  totalTokens: 439,
+                  costUsd: 0,
+                }}
+              />
             </div>
           </div>
           <p className="text-muted-foreground mt-4 text-sm leading-relaxed">

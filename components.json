@@ -14,7 +14,7 @@
   "aliases": {
     "components": "@/features",
     "utils": "@/infrastructure/ui",
-    "ui": "@/features/ui",
+    "ui": "@/infrastructure/ui-kit",
     "lib": "@/infrastructure",
     "hooks": "@/features/hooks"
   }

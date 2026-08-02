@@ -178,6 +178,22 @@
   .surface {
     @apply bg-card border-border rounded-xl border;
   }
+
+  /* The context-window bar on the models list, drawn to scale against the
+     largest window in the catalog, which is what turns a column of numbers
+     into a comparison you can see.
+
+     Pointedly not rust. The accent means "you can operate this", and a bar you
+     can only read is not that. The win-rate bar in feature 9 is rust because a
+     win rate is the thing that page exists to argue about; a context window is
+     a specification. */
+  .measure-bar {
+    @apply bg-border h-1 w-full overflow-hidden rounded-full;
+  }
+
+  .measure-bar > span {
+    @apply bg-muted-foreground/70 block h-full rounded-full;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
