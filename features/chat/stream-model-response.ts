@@ -27,11 +27,23 @@ import { openrouter } from "./openrouter";
  * at once, which is exactly the failure this product is supposed to make
  * impossible.
  *
- * The metrics computed at finish are written into the `ModelResponse` row
- * `startTurn` already created, and handed back as the same object on
- * `messageMetadata` — one measured value, not two estimates that can drift. A
- * model that errors writes `FAILED` from the same `onError` path that already
- * turns the failure into the sentence the client shows.
+ * The metrics are computed exactly once, in `messageMetadata` below, and
+ * `onFinish` only reads that same value back — not the other way around. That
+ * ordering is forced, not stylistic: `streamText`'s own `onFinish` runs inside
+ * the underlying stream's `flush()`, which only fires once every part has
+ * already been forwarded downstream, while `messageMetadata` reads the
+ * `"finish"` part as it passes through on its way to the client. Computing
+ * metrics inside `onFinish` and hoping `messageMetadata` would still see them
+ * — this function's original shape — meant the client's `"finish"` chunk
+ * always went out carrying no metadata at all: measured live, the browser
+ * never saw a single metric until a reload re-read them from the database.
+ * Computing them in `messageMetadata` first guarantees they exist by the time
+ * `onFinish` reads the same variable a moment later, so the client sees them
+ * the instant its own stream ends, in step with the answer finishing, not
+ * after a round trip through the database.
+ *
+ * A model that errors writes `FAILED` from the same `onError` path that
+ * already turns the failure into the sentence the client shows.
  *
  * PostHog's own LLM analytics (tokens, cost, latency for the call itself) is
  * captured by hand with `captureAiGeneration` rather than `withTracing`
@@ -56,12 +68,15 @@ export const streamModelResponse = (
     onChunk: ({ chunk }) => {
       if (chunk.type === "text-delta") timer.markFirstToken();
     },
-    onFinish: async ({ text, usage }) => {
-      metrics = timer.read({
-        inputTokens: usage.inputTokens,
-        outputTokens: usage.outputTokens,
-        totalTokens: usage.totalTokens,
-      });
+    onFinish: async ({ text }) => {
+      if (!metrics) {
+        // Should not happen: `messageMetadata` computes this from the same
+        // "finish" part before this callback ever runs. Guarded rather than
+        // asserted so a future SDK change that breaks that ordering fails
+        // loudly here instead of writing bad numbers to the database.
+        console.error(`[chat] ${modelId} finished with no metrics computed yet`);
+        return;
+      }
 
       await markModelResponseComplete({ turnId, modelId, text, metrics });
       trackModelAnswered({ clerkId, turnId, modelId, status: "COMPLETE" });
@@ -99,8 +114,17 @@ export const streamModelResponse = (
   });
 
   return result.toUIMessageStreamResponse<ChatUIMessage>({
-    messageMetadata: ({ part }) =>
-      part.type === "finish" && metrics ? metrics : undefined,
+    messageMetadata: ({ part }) => {
+      if (part.type !== "finish") return undefined;
+
+      metrics = timer.read({
+        inputTokens: part.totalUsage.inputTokens,
+        outputTokens: part.totalUsage.outputTokens,
+        totalTokens: part.totalUsage.totalTokens,
+      });
+
+      return metrics;
+    },
     onError: () =>
       "This model didn't come back. You can try it again, the others aren't affected.",
   });

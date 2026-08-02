@@ -1,6 +1,9 @@
 import { parseJsonEventStream, readUIMessageStream, uiMessageChunkSchema } from "ai";
 
-import type { ChatUIMessage } from "@/infrastructure/model-response-metrics";
+import type {
+  ChatUIMessage,
+  ModelResponseMetrics,
+} from "@/infrastructure/model-response-metrics";
 
 import type { PlainMessage } from "./model-messages";
 
@@ -29,7 +32,7 @@ export const streamModelAnswer = async (params: {
   readonly turnId: string;
   readonly messages: readonly PlainMessage[];
   readonly onTextUpdate: (text: string) => void;
-  readonly onDone: (status: StreamOutcome) => void;
+  readonly onDone: (status: StreamOutcome, metrics: ModelResponseMetrics | null) => void;
 }): Promise<void> => {
   try {
     const response = await fetch("/api/chat", {
@@ -43,7 +46,7 @@ export const streamModelAnswer = async (params: {
     });
 
     if (!response.ok || !response.body) {
-      params.onDone("FAILED");
+      params.onDone("FAILED", null);
       return;
     }
 
@@ -59,6 +62,7 @@ export const streamModelAnswer = async (params: {
     );
 
     let failed = false;
+    let metrics: ModelResponseMetrics | null = null;
 
     const messageStream = readUIMessageStream<ChatUIMessage>({
       stream: chunkStream,
@@ -69,11 +73,15 @@ export const streamModelAnswer = async (params: {
 
     for await (const message of messageStream) {
       params.onTextUpdate(extractText(message));
+      // The server attaches the measured metrics as metadata on the finish
+      // part only, so most messages in this loop carry none — the last one
+      // that does is the real reading, not an estimate to be replaced later.
+      if (message.metadata) metrics = message.metadata;
     }
 
-    params.onDone(failed ? "FAILED" : "COMPLETE");
+    params.onDone(failed ? "FAILED" : "COMPLETE", metrics);
   } catch (error) {
     console.error(`[arena] lost the stream for ${params.modelId}`, error);
-    params.onDone("FAILED");
+    params.onDone("FAILED", null);
   }
 };

@@ -204,8 +204,8 @@ export const ArenaScreen = ({
           turnId: turn.id,
           messages,
           onTextUpdate: (text) => updateResponse(turn.id, response.id, { text }),
-          onDone: (status) => {
-            updateResponse(turn.id, response.id, { status });
+          onDone: (status, metrics) => {
+            updateResponse(turn.id, response.id, { status, metrics });
             inFlight.current.delete(response.id);
           },
         });
