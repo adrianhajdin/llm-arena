@@ -11,12 +11,21 @@ const { posthogKey, posthogHost } = publicEnv;
 
 if (typeof window !== "undefined" && posthogKey && posthogHost) {
   posthog.init(posthogKey, {
-    api_host: posthogHost,
+    // Requests go through this app's own `/ingest` rewrite (next.config.ts)
+    // rather than straight to PostHog, so an ad blocker sees first-party
+    // traffic. `ui_host` keeps the real host for things the proxy doesn't
+    // cover, like the in-app toolbar link.
+    api_host: "/ingest",
+    ui_host: posthogHost,
     capture_pageview: "history_change",
     capture_pageleave: true,
     // Session replay and heatmaps are on from the start, per docs/scope.md.
     disable_session_recording: false,
     enable_heatmaps: true,
+    // An unhandled exception is a real failure the user sees with nothing
+    // reported anywhere; model failures already land in `model_answered`,
+    // this catches the rest.
+    capture_exceptions: true,
     defaults: "2025-05-24",
   });
 }

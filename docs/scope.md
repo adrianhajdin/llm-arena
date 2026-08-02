@@ -26,7 +26,7 @@ There are rough hand-drawn sketches for the arena screen, the leaderboard, and t
 | 6   | Send a prompt, parallel streams, and voting | Slice 1    | Built, typecheck/lint/build pass, needs a manual end-to-end pass   |
 | 7   | App shell & thread history                  | Slice 2    | Built, thread history wired to real data, needs a keyboard check   |
 | 8   | Public thread visibility & sharing          | Slice 3    | Built, typecheck/lint/build pass, needs a person to check as owner |
-| 9   | Leaderboard: global & personal              | Slice 4    | not started                                                        |
+| 9   | Leaderboard: global & personal              | Slice 4    | Built, typecheck/lint/build pass, needs a person to eye-check      |
 
 ## Foundation
 
@@ -515,26 +515,50 @@ Anyone should be able to open a thread's link and see it, without an account, th
 
 **Sharing itself is a "Copy link" button in the top bar, shown on any `/t/[id]` route, for anyone.** Not owner-gated: the url in the address bar is already just as public, so hiding the button from a non-owner would protect nothing while making the feature harder to find for the person who most wants it, someone who was just sent the link. It copies `window.location.href` and confirms with a brief "Copied" swap rather than a bare icon that gives no feedback that anything happened.
 
+**`/t/[threadId]` gets its own Arcjet layer, wired in `proxy.ts` rather than the page.** Making the thread readable with no auth gate turned it into the one route that hits the database with zero Arcjet coverage: Shield only ever attaches where `arcjetClient().withRule(...)` is actually called, and nothing called it here. `page.tsx` is a Server Component and never receives a `Request`, so there's no `protect()` call site inside it at all; `proxy.ts` is the only place upstream of the page that sees one, which is also the first real use of that file beyond running Clerk. `features/threads/thread-protection.ts` mirrors `chat-protection.ts`'s shape: bots denied outright, `allow: []`, same reasoning as chat, this page has no legitimate crawler use case and rich link previews are already out of scope. The rate limit is a sliding window of 60 requests per 60 seconds, keyed on IP rather than `userId`, because there is no signed-in identity to key on here — the whole point of this feature is that there doesn't need to be one. IP is a weaker guarantee than chat's per-user bucket (shared NATs, proxies), which is exactly why the number is generous: it exists to stop volumetric hammering of a link or the route as a whole, not to ever be the reason a real visitor's link fails to load.
+
 #### What got built
 
 - `app/(shell)/t/[threadId]/page.tsx` now selects `userId` on the thread, resolves the viewer's own app user id via Clerk, and passes `isOwner` to `ArenaScreen`.
 - `features/arena/arena-screen.tsx`: `isOwner` prop (defaults `true`, since starting a brand-new thread inherently owns it), gates the `Composer` and folds into `canVote`; a non-owner gets the plain-sentence notice instead of the composer.
 - `features/shell/top-bar.tsx`: a "Copy link" control on thread routes, with `LinkIcon`/`CheckIcon` added to `features/shell/icons.tsx`.
+- `features/threads/thread-protection.ts`: `guardThreadRequest`, Shield (inherited from the shared client) plus bot detection and an IP-keyed sliding window, same denial shape as chat — plain sentence, real reason logged server-side, `isErrored()` lets the request through rather than dying.
+- `proxy.ts`: `clerkMiddleware()` now takes a callback that calls `guardThreadRequest` for any `/t/*` path and returns its denial, otherwise falls through. Still gates no route by sign-in; that split stands.
 
 #### Verified
 
-Typecheck, lint and a real production build all pass. Against a running dev server, using the codebase's established pattern for what `curl` can't reach on its own, a throwaway probe route read a real thread id, then was deleted:
+Typecheck, lint, `format:check`, and a real production build all pass. Against a running dev server, using the codebase's established pattern for what `curl` can't reach on its own, a throwaway probe route read a real thread id, then was deleted:
 
 - A made-up thread id still returns a real 404 page.
 - A real thread, requested with no session at all (`curl`, so definitely not its owner), returns 200: the page renders, no `<textarea>` and no "Pick this" button appear anywhere in the served HTML, and the plain sentence "You're viewing someone else's thread. Only its owner can add to it or vote." is present. "Copy link" is present on the same page.
+- Confirmed directly in the Arcjet console (`requests list` via the CLI) after real traffic: `curl` against `/t/[threadId]` comes back `CONCLUSION_DENY` / `REASON_BOT_V2`, the same real browser loading the same route comes back `CONCLUSION_ALLOW`. Bot detection is live and correctly tells the two apart.
 
 - [x] Decide the approach
 - [x] `isOwner` resolved server-side and threaded down to the arena screen
 - [x] Composer and every vote button hidden for a non-owner, replaced with a plain sentence
 - [x] "Copy link" control on thread routes, for anyone
+- [x] Arcjet on `/t/[threadId]`: Shield, bot detection, and an IP-keyed rate limit, wired in `proxy.ts`
 - [x] Typecheck, lint, `format:check` and a real production build all pass
-- [x] Verified: a made-up thread 404s; a real thread viewed with no session renders read-only, with no composer and no vote button, and the copy-link control present
+- [x] Verified: a made-up thread 404s; a real thread viewed with no session renders read-only, with no composer and no vote button, and the copy-link control present; `curl` against the route is denied as a bot in the Arcjet console while real browser traffic is allowed
 - [ ] **Needs a person:** open a thread signed in as its real owner and confirm the composer and vote buttons still render normally; click "Copy link" in a real browser and confirm the clipboard actually holds the url (a headless check can't observe the clipboard itself)
+
+**PostHog follow-up, added after an analytics audit.** The funnel from feature 6 (`prompt_sent` / `model_answered` / `vote_cast`) had no coverage at all for this feature's actual subject, sharing. The first draft of that fix proposed a `thread_visibility_changed` event, which was wrong on inspection: there is no visibility to change, feature 8 confirmed above that no such column or toggle exists, every thread is already public by its unguessable id. Replaced with the event that actually corresponds to a real user action here:
+
+- `thread_link_copied` — fired from the "Copy link" button itself (`features/shell/top-bar.tsx`), the real share action.
+- `public_thread_viewed` — fired once from `ArenaScreen` when a non-owner opens a real thread (`features/arena/arena-screen.tsx`), the only signal for whether a shared link is actually viewed by someone besides its owner.
+
+Two more gaps closed at the same time, since they were found during the same audit and are cheap:
+
+- **Reverse proxy** (`next.config.ts`): browser PostHog traffic now rewrites through this app's own `/ingest` path rather than calling the PostHog host directly, so an ad blocker sees first-party traffic. Region-aware: the destination host is read from `NEXT_PUBLIC_POSTHOG_HOST` itself (currently `eu.i.posthog.com`), not hardcoded to the US region. `posthog-provider.tsx` now sets `api_host: "/ingest"` and keeps `ui_host` as the real host for things the proxy doesn't cover.
+- **Exception autocapture** (`capture_exceptions: true` in `posthog-provider.tsx`): model failures already land in `model_answered`, but an unhandled client exception — a render bug, a stray throw — had nowhere to go.
+
+Feature flags, group analytics, and surveys were all considered and skipped: nothing in this app currently has a tier, an org concept, or a research-tooling need for them.
+
+- [x] Reverse proxy for PostHog ingestion (`next.config.ts`)
+- [x] Exception autocapture turned on (`posthog-provider.tsx`)
+- [x] `thread_link_copied` and `public_thread_viewed` events
+- [x] Typecheck, lint, and a real production build all pass
+- [ ] **Needs a person:** confirm all four land in the real PostHog project — copy a link, then open it in a private window as a non-owner, and check the project's live events for `thread_link_copied` and `public_thread_viewed`; also confirm `/ingest` requests show as first-party in the Network tab rather than a direct call to `eu.i.posthog.com`
 
 ## Slice 4: Leaderboard
 
@@ -542,8 +566,38 @@ Typecheck, lint and a real production build all pass. Against a running dev serv
 
 Two leaderboards from the same votes, one for everyone, one just for the signed-in user. Each row's win rate is the big, bold number, in the accent color, with a small bar next to it, always written as "won 4 of 5," never a bare percentage or a made-up score. Smaller, quieter numbers underneath for average speed and time-to-first-token, each clearly labeled. No cost or "cheapest" stat, every model is free, so that number never means anything here. First place gets a subtle highlight, nobody else does.
 
-- [ ] Decide the approach
-- [ ] Build it
+#### Decided
+
+**The query lives in `features/leaderboard/leaderboard-standings.ts`, `server-only`, reading `@/infrastructure/database` directly.** One function, `getLeaderboardStandings(scopeUserId)`, serves both leaderboards: `null` counts everyone's votes, a signed-in user's app id scopes every number to threads they own. This is the query feature 3 already proved against the real database, grouping by `modelId` with wins joined from votes and average speed over completed answers only.
+
+**"Of" is how many times a model has actually completed an answer, "won" is how many of those were picked, and both come from two separate queries aggregated in memory rather than one SQL group-by.** A model's win only ever exists on a `COMPLETE` response (feature 3's write path already refuses a vote on anything else), and a personal scope filters `ModelResponse` by the thread it belongs to but filters `Vote` directly by `Vote.userId`, since voting is owner-only and a vote's `userId` is always the thread owner. That is simpler than joining through `Turn` and `Thread` a second time and says the same thing.
+
+**Ranking is by win rate descending, ties broken by total answers then name.** The scope's own "not doing" list already parks weighting by sample size as a nice-to-have, so a plain win-rate sort is the honest, undecorated version of what's asked for rather than an invented formula nobody asked for.
+
+**The Global/Personal toggle is a real navigation to `?view=me`, not client state.** Two server-rendered links styled as a segmented control, `aria-current` marking the active one. No JS needed, and the active tab reads correctly on a full page load or a shared URL.
+
+**"Just me" cannot exist without an account, same reasoning as feature 7's thread list.** Signed out, or before resolving a viewer, it fetches nothing and shows a sign-in invitation instead of an empty table.
+
+**No cost column.** Every model here is free tier, so the number would always read the same meaningless zero — the scope says so directly, and feature 9 is where that finally shows up as an omission rather than a decision made elsewhere.
+
+#### What got built
+
+- `features/leaderboard/leaderboard-standings.ts`, the query and the real `LeaderboardRow` type. `placeholder-standings.ts` deleted.
+- `features/leaderboard/leaderboard-screen.tsx`, rewritten to take `rows`, `view`, and `needsSignIn` as props instead of the placeholder import. The toggle, the sign-in notice, and an empty-state sentence (distinct wording for "no votes yet at all" versus "no votes on your own threads yet") are new; the table markup is otherwise the same one feature 7 already built and eye-checked.
+- `app/(shell)/leaderboard/page.tsx`, now an async Server Component: resolves Clerk, looks up the app user id (no upsert, same reasoning as features 7 and 8), reads `searchParams` for the view, and calls the query.
+
+#### Verified
+
+Typecheck, lint, `format:check` and a real production build all pass. Against a running dev server and the real database: `/leaderboard` renders real rows, ranked by win rate, with a real top row at 80% ("won 4 of 5"), real millisecond and tok/s figures, and no cost column; `/leaderboard?view=me` signed out shows the sign-in invitation instead of a table; the toggle's `aria-current` lands on whichever link matches the current view; the table caption, `role="group"` on the toggle, and the scoped query all read correctly from the served HTML. No server errors in the log.
+
+- [x] Decide the approach
+- [x] `leaderboard-standings.ts`: real query, grouped by modelId, wins from votes, averages over completed answers only, scoped by an optional viewer id
+- [x] `leaderboard-screen.tsx` wired to real rows; placeholder deleted
+- [x] Global/Personal toggle as a real navigation to `?view=me`
+- [x] Sign-in invitation when "Just me" has no session; a distinct empty-state sentence when a scope has zero votes
+- [x] Typecheck, lint, `format:check` and a real production build all pass
+- [x] Verified against a running dev server and the real database: ranked real rows, correct percentages and averages, no cost column, sign-in notice when signed out
+- [ ] **Needs a person:** eye-check the win-rate bar and first-place highlight in a real browser, both themes, and confirm the toggle is keyboard-operable
 
 ## Not doing right now
 
