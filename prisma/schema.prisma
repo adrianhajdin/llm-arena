@@ -1,0 +1,24 @@
+// Prisma schema for LLM Arena.
+//
+// Feature 1 owns only the piece its own Clerk wiring implies: a User row keyed
+// to a Clerk id, so a signed-in person has something to hang records off. The
+// real modelling, threads, per-model messages, and votes, belongs to feature 3
+// in docs/scope.md and extends this file rather than replacing it.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model User {
+  id        String   @id @default(cuid())
+  clerkId   String   @unique
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("users")
+}
