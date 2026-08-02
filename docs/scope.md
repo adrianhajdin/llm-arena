@@ -24,7 +24,7 @@ There are rough hand-drawn sketches for the arena screen, the leaderboard, and t
 | 4   | Design & look                               | Foundation | built, contrast measured, needs an eye check                     |
 | 5   | Model picker                                | Slice 1    | built and verified, needs a keyboard check                       |
 | 6   | Send a prompt, parallel streams, and voting | Slice 1    | Built, typecheck/lint/build pass, needs a manual end-to-end pass |
-| 7   | App shell & thread history                  | Slice 2    | UI built with placeholders, needs a keyboard check               |
+| 7   | App shell & thread history                  | Slice 2    | Built, thread history wired to real data, needs a keyboard check |
 | 8   | Public thread visibility & sharing          | Slice 3    | not started                                                      |
 | 9   | Leaderboard: global & personal              | Slice 4    | not started                                                      |
 
@@ -462,6 +462,42 @@ Against a running dev server, all five routes return 200 with zero errors or war
 - [x] Verified: every route responds, landmarks and `aria-current` present, no server errors
 - [x] Typecheck, lint, `format:check` and a real production build all pass
 - [ ] **Needs a person:** open a narrow window, confirm the drawer opens, Escape closes it, focus returns to the toggle, and a link inside it closes it. Check both themes.
+
+#### Thread history, wired to the real database
+
+The shell above was UI only; `PLACEHOLDER_THREAD_GROUPS` stood in for a signed-in user's actual threads. This closes that placeholder out.
+
+**The query lives in `features/shell/thread-history.ts`, `server-only`, reading `@/infrastructure/database` directly.** It is feature-specific, not a second `infrastructure/` client: nothing else needs a recency-grouped thread list, so it stays where it is used, the same layering feature 5's picker already draws.
+
+**Recency grouping is computed in the query, not eyeballed from a raw timestamp.** "Today" is the calendar day so far, "This week" the six days before that, "Earlier" everything older, all measured from each thread's `updatedAt`. Empty groups are dropped rather than rendered with a heading and nothing under it.
+
+**A thread's model count is the distinct `modelId`s across all its `ModelResponse` rows, not a stored column.** No `Model` table exists (feature 3's decision) and a thread's model set never changes after turn one (feature 6's decision), so this is cheap to compute and never drifts from what the arena actually locked in.
+
+**`Thread.updatedAt` now advances on a follow-up, not only on creation.** `@updatedAt` only fires on a write to the `Thread` row itself, and `start-turn.ts` previously only ever created or read it, never touched it on a reply. Without a deliberate touch, a thread from six turns ago and one from six months ago sort identically the moment both were merely _created_ around the same time, which is exactly the distinction "grouped by recency" exists to draw. `startTurn` now updates the row on every follow-up inside the same transaction that writes the turn.
+
+**The layout fetches this server-side and hands it down as a prop, rather than the sidebar reading it itself.** The sidebar is a client component (it needs `usePathname` and the drawer's `onNavigate`), and this needs a signed-in `userId` from Clerk plus a database round trip, neither of which belongs in client code. `app/(shell)/layout.tsx` resolves the Clerk `userId`, looks up the app's own `users.id` via `findAppUserId` (no upsert: a shell render should never be the thing that creates a user row), and passes the resulting groups into `AppShell` → `Sidebar` as `threadGroups`. Signed out, or before a first prompt, that's simply `[]`, which the sidebar already had a rule for.
+
+**A new thread needs an explicit `router.refresh()` after `router.push`, and a follow-up needs one too.** The App Router does not re-run a shared layout on a plain navigation between sibling routes it has already rendered, and here the layout is exactly where the thread list is read. Without the refresh, a brand-new thread would not appear in the sidebar until some unrelated hard reload, and a follow-up's recency bump would not reorder it. Both call sites in `arena-screen.tsx` now pair `push`/local state update with `refresh()`.
+
+#### What got built
+
+- `features/shell/thread-history.ts`, the query and its `ThreadSummary`/`ThreadGroup` types. `placeholder-threads.ts` deleted.
+- `app/(shell)/layout.tsx` resolves the signed-in user and calls it, passing `threadGroups` down.
+- `sidebar.tsx` and `app-shell.tsx` take `threadGroups` as a prop instead of importing the placeholder; a signed-in user with no threads yet sees a plain sentence instead of an empty section.
+- `features/arena/start-turn.ts` touches `thread.updatedAt` on a follow-up; `arena-screen.tsx` calls `router.refresh()` after both a new-thread `push` and a follow-up send.
+
+#### Verified
+
+Typecheck, lint and a real production build all pass. Checked against the real running dev server and a real signed-in session (not a throwaway probe, since this reads the account already in use): the sidebar rendered live "Today"/"This week"/"Earlier" groups with real thread titles and model counts, sending a follow-up in an open thread was visible in the server log with no new errors, and the transient `PLACEHOLDER_THREAD_GROUPS` / `threadGroups.length` errors seen mid-edit in the dev log were Fast Refresh serving a stale client module against the old and new prop shape in turn, not a real bug: they stopped the moment the edit finished landing, and the following compiles and requests were clean.
+
+- [x] Decide the approach
+- [x] `features/shell/thread-history.ts`: real threads, grouped by recency, with a real model count
+- [x] `Thread.updatedAt` bumped on a follow-up so recency reflects real activity
+- [x] Sidebar and shell take `threadGroups` as a prop; placeholder file deleted
+- [x] `router.refresh()` after a new thread's navigation and after a follow-up
+- [x] Typecheck, lint, `format:check` and a real production build all pass
+- [x] Verified against a running dev server and a real signed-in session: real groups, titles, and model counts render; no new server errors
+- [ ] **Needs a person:** confirm in the browser that a brand-new thread appears in "Today" immediately after the first prompt, and that a follow-up in an older thread moves it back up to "Today" without a manual reload.
 
 ## Slice 3: Public visibility & sharing
 

@@ -227,7 +227,12 @@ export const ArenaScreen = ({
     }
 
     if (threadId === null) {
+      // The sidebar's thread list (feature 7) is read server-side in the shared
+      // shell layout, which the App Router does not re-run on a plain `push` to
+      // a route it has never rendered. `refresh()` forces that reread so the
+      // new thread shows up without a hard reload.
       router.push(`/t/${result.threadId}`);
+      router.refresh();
       return;
     }
 
@@ -247,6 +252,10 @@ export const ArenaScreen = ({
         })),
       },
     ]);
+
+    // Same reason as above: a follow-up bumps the thread's `updatedAt`, and the
+    // sidebar's recency grouping needs that reread to reflect it.
+    router.refresh();
   };
 
   const handleVote = async (turnId: string, modelResponseId: string) => {

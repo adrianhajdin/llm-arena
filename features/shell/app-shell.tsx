@@ -4,6 +4,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { CloseIcon } from "./icons";
 import { Sidebar } from "./sidebar";
+import { type ThreadGroup } from "./thread-history";
 import { TopBar } from "./top-bar";
 
 /**
@@ -19,9 +20,11 @@ import { TopBar } from "./top-bar";
 export const AppShell = ({
   children,
   sidebarFooter,
+  threadGroups,
 }: {
   readonly children: ReactNode;
   readonly sidebarFooter: ReactNode;
+  readonly threadGroups: readonly ThreadGroup[];
 }) => {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const openerRef = useRef<HTMLButtonElement>(null);
@@ -68,7 +71,7 @@ export const AppShell = ({
         aria-label="Navigation"
         className="border-border hidden w-64 shrink-0 border-r lg:block"
       >
-        <Sidebar footer={sidebarFooter} />
+        <Sidebar footer={sidebarFooter} threadGroups={threadGroups} />
       </aside>
 
       {drawerOpen && (
@@ -93,7 +96,11 @@ export const AppShell = ({
             >
               <CloseIcon className="size-5" />
             </button>
-            <Sidebar footer={sidebarFooter} onNavigate={closeDrawer} />
+            <Sidebar
+              footer={sidebarFooter}
+              onNavigate={closeDrawer}
+              threadGroups={threadGroups}
+            />
           </aside>
         </div>
       )}
