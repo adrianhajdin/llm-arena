@@ -1,5 +1,6 @@
 import "server-only";
 
+import { Prisma } from "@/generated/prisma/client";
 import { database } from "@/infrastructure/database";
 
 /**
@@ -15,8 +16,12 @@ import { database } from "@/infrastructure/database";
  *
  * The count and the insert share one transaction, so two clicks arriving at
  * once cannot both read "two answers" and both write. The unique index on
- * `turnId` is the backstop underneath that, and a race that beats the
- * transaction still ends as a rejected duplicate rather than a second vote.
+ * `turnId` is the backstop underneath that: Postgres reads at `read committed`,
+ * so two racing votes can both see no vote yet, and the loser of that race is
+ * rejected by the index rather than becoming a second vote. That rejection is
+ * caught below and returned as the same `already-voted` refusal the read path
+ * produces, because a caller turning this into a sentence should not have to
+ * care which of the two guards fired.
  */
 
 /** Why a vote was refused, in terms the caller can turn into a sentence. */
@@ -43,6 +48,17 @@ const MINIMUM_ANSWERS_TO_COMPARE = 2;
 
 const refuse = (refusal: VoteRefusal): CastVoteResult =>
   Object.freeze({ ok: false as const, refusal });
+
+/**
+ * A unique index on `votes` rejecting this insert as a duplicate.
+ *
+ * `turnId` and `modelResponseId` are the only unique columns on the table, and
+ * a response belongs to exactly one turn, so either violation says the same
+ * thing: this turn has already been decided. The specific index is not worth
+ * inspecting, because the answer would be the same either way.
+ */
+const isDuplicateVote = (error: unknown): boolean =>
+  error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
 
 export const castVote = async ({
   turnId,
@@ -81,10 +97,18 @@ export const castVote = async ({
       return refuse("response-not-a-candidate");
     }
 
-    const vote = await tx.vote.create({
-      data: { turnId, userId, modelResponseId },
-      select: { id: true },
-    });
+    // The read above can be beaten by a vote committed between it and this
+    // insert, and the index rejecting that loser must read as a refusal rather
+    // than escape as a raw Prisma error the caller has no sentence for.
+    try {
+      const vote = await tx.vote.create({
+        data: { turnId, userId, modelResponseId },
+        select: { id: true },
+      });
 
-    return Object.freeze({ ok: true as const, voteId: vote.id });
+      return Object.freeze({ ok: true as const, voteId: vote.id });
+    } catch (error) {
+      if (isDuplicateVote(error)) return refuse("already-voted");
+      throw error;
+    }
   });

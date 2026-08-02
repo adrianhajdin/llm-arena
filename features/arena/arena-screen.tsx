@@ -88,8 +88,11 @@ const ResponseColumn = ({ response }: { readonly response: PlaceholderResponse }
         </div>
       ) : (
         <div className="flex flex-col gap-3 text-[15px] leading-relaxed">
-          {response.text.split("\n\n").map((paragraph) => (
-            <p key={paragraph.slice(0, 24)}>{paragraph}</p>
+          {/* Paragraphs are appended in order and never reordered, and two of
+              them can genuinely open with the same words, so the position is
+              the only key here that is actually unique. */}
+          {response.text.split("\n\n").map((paragraph, index) => (
+            <p key={index}>{paragraph}</p>
           ))}
         </div>
       )}
