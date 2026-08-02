@@ -599,6 +599,43 @@ Typecheck, lint, `format:check` and a real production build all pass. Against a 
 - [x] Verified against a running dev server and the real database: ranked real rows, correct percentages and averages, no cost column, sign-in notice when signed out
 - [ ] **Needs a person:** eye-check the win-rate bar and first-place highlight in a real browser, both themes, and confirm the toggle is keyboard-operable
 
+## Hardening
+
+Not a planned feature — work that came back from production and had to be answered.
+
+### Error boundaries, and a shell that degrades instead of dying
+
+_Triggered by a real incident._ On 2 August 2026, right after the feature 9 deploy (`c1653e2`), six unhandled `$exception` events fired from the arena root in a ~98-second window (18:34:30–18:36:08Z), across 2 sessions and 3 ids, then never recurred. The message was React's production-redacted RSC placeholder, so the actual throw isn't recoverable from PostHog — only a digest. The hypothesis is a transient cold-start failure in one of the three server-side awaits in `app/(shell)/layout.tsx` (`auth()`, `findAppUserId`, `listThreadHistory`); confirming which needs the Vercel runtime logs for that window matched against the digest, which is a person's job, not something the code can settle.
+
+What the code _could_ settle was the real defect the incident exposed: there was no `error.tsx` or `global-error.tsx` anywhere under `app/`, so any throw from a Server Component showed Next's default framework error screen — a raw exception with no plain sentence and no retry, which is exactly what the rules forbid. And `(shell)/layout.tsx` wraps every real screen, so the blast radius was the whole app.
+
+#### Decided
+
+**Three layers, because one boundary can't cover its own layout.** An `error.tsx` boundary never catches a throw from the `layout.tsx` of its own segment — only a boundary _above_ it does. Since the suspected culprit is the shell layout itself, catching it needs both a boundary above (the root `global-error.tsx`) and the layout guarding its own reads. So: `(shell)/error.tsx` catches throws from the shell's screens; the layout degrades rather than throws; `global-error.tsx` is the last-resort backstop for anything either misses.
+
+**The layout degrades the same way `fetch-model-catalog.ts` already does.** Its three awaits are wrapped in one `try/catch`: the real reason goes to the server log with `console.error`, and an empty thread list stands in for the history so the frame stays usable. An empty sidebar and a working shell beat a dead page. The catch calls `unstable_rethrow(error)` first, so Next's own control-flow signals — a `redirect()`/`notFound()` from Clerk, and the dynamic-rendering bail-out that marks the route dynamic at build time — pass through untouched and only a genuine failure is swallowed. (Observed both ways: without the rethrow, the build-time dynamic signal got caught and logged; with it, the signal propagates and every shell route is correctly marked `ƒ` dynamic.)
+
+**`global-error.tsx` carries its own styles.** It replaces the entire document — providers, theme context, fonts, `globals.css`, all gone — so it can't lean on any of them. It ships its own `<html>`/`<body>` and an inline `<style>` block with a `prefers-color-scheme` palette, so it reads honestly on a light or dark system with nothing else loaded. Both boundaries reuse the app's existing failure language: the design page's destructive-tinted card, a plain sentence, and a "Try again" / "Reload" action wired to `reset()`.
+
+#### What got built
+
+- `app/(shell)/error.tsx`, the shell-screen boundary. A client component (boundaries must be), logs the error and digest from the client since that's the only place the real reason survives, renders the failure card with a retry.
+- `app/global-error.tsx`, the backstop. Self-contained document with its own inline theme-aware styles and a reload action.
+- `app/(shell)/layout.tsx`, thread-history reads pulled into a `loadThreadHistory` helper that catches, `unstable_rethrow`s control-flow signals, logs the real reason, and returns `[]` on a genuine failure.
+
+#### Verified
+
+Typecheck, lint, `format:check` and a real production build all pass. Against `next start` with a throwing test route wired temporarily into `(shell)`: the RSC payload shows the `error` boundary installed on the shell segment (it was `$undefined` before), the errorScripts chunk it points at is `error.tsx` itself (contains "This screen didn't load"), the `AppShell` frame still server-renders around the errored content, and no exception text or stack leaks into the HTML — only a numeric digest. React streams an error-boundary fallback to the client rather than SSR-ing its text, so the literal sentence renders on hydration, not in the raw HTML; the boundary and its chunk being wired to the right segment is what curl can confirm. `global-error.tsx`'s text is bundled too. The test route was removed after.
+
+- [x] Decide the approach
+- [x] `(shell)/error.tsx`: plain sentence + retry, logs the real reason and digest
+- [x] `global-error.tsx`: self-contained, theme-aware backstop with a reload action
+- [x] `(shell)/layout.tsx`: degrade on a genuine read failure, `unstable_rethrow` control-flow signals, empty thread list stands in
+- [x] Typecheck, lint, `format:check` and a real production build all pass
+- [x] Verified boundary wiring, frame survival, and no leaked exception against `next start` with a throwing route
+- [ ] **Needs a person:** pull the Vercel runtime logs for 18:34–18:36Z on 2 August 2026 and match the React digest, to name what actually threw
+- [ ] **Needs a person:** eye-check both boundary screens in a real browser, in light and dark, and confirm the retry/reload button is keyboard-operable
+
 ## Not doing right now
 
 Kept here so the plan stays honest about what's deliberately left out.
