@@ -1,6 +1,7 @@
 "use client";
 
 import { useRouter } from "next/navigation";
+import posthog from "posthog-js";
 import { useEffect, useRef, useState } from "react";
 
 import { type CatalogModel } from "@/infrastructure/model-catalog";
@@ -228,6 +229,15 @@ export const ArenaScreen = ({
       });
     });
   }, [turns, isOwner]);
+
+  useEffect(() => {
+    // Fires once per page load, for a real thread someone other than its
+    // owner opened, the only way to tell whether sharing a link actually
+    // gets viewed rather than just proving the link works.
+    if (isOwner || threadId === null) return;
+
+    posthog.capture("public_thread_viewed", { threadId });
+  }, [isOwner, threadId]);
 
   const handleSend = async (prompt: string, models: readonly LockedModel[]) => {
     setPending(true);

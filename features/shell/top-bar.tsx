@@ -1,6 +1,7 @@
 "use client";
 
 import { usePathname } from "next/navigation";
+import posthog from "posthog-js";
 import { type RefObject, useState } from "react";
 
 import { CheckIcon, LinkIcon, PanelIcon } from "./icons";
@@ -33,10 +34,12 @@ const showsStandings = (pathname: string) => pathname.startsWith("/t/");
  * no feedback that anything actually happened.
  */
 const ShareButton = () => {
+  const pathname = usePathname();
   const [copied, setCopied] = useState(false);
 
   const copyLink = async () => {
     await navigator.clipboard.writeText(window.location.href);
+    posthog.capture("thread_link_copied", { threadId: pathname.slice("/t/".length) });
     setCopied(true);
     window.setTimeout(() => setCopied(false), 2000);
   };
