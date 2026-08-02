@@ -20,6 +20,8 @@ There's no formal spec-file system here, no numbered acceptance criteria, no sep
 
 ## Rules
 
+These are the law. `docs/coding-standards.md` is how they're actually enforced, which of them the linter catches and which only a person can, plus the file, naming, and layering conventions that go with them. Read it before writing code; it also explains why `process.env` is banned outside `infrastructure/env.ts` and `infrastructure/public-env.ts`, and why the pre-commit hook deliberately doesn't typecheck.
+
 - Functional style: pure functions by default, no shared mutable state, side effects pushed to the edges.
 - Immutable data, `const` and `readonly`, prefer `map`/`filter`/`reduce` over mutating loops.
 - Folder by feature, not by shared layer-wide folders.

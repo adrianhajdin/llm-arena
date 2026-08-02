@@ -3,10 +3,7 @@ import "server-only";
 import { streamText, type UIMessage } from "ai";
 
 import type { ChatRequest } from "./chat-request";
-import {
-  createResponseTimer,
-  type ModelResponseMetrics,
-} from "./model-response-metrics";
+import { createResponseTimer, type ModelResponseMetrics } from "./model-response-metrics";
 import { openrouter } from "./openrouter";
 
 /**
@@ -24,10 +21,7 @@ export type ChatUIMessage = UIMessage<ModelResponseMetrics>;
  * at once, which is exactly the failure this product is supposed to make
  * impossible.
  */
-export const streamModelResponse = ({
-  modelId,
-  messages,
-}: ChatRequest): Response => {
+export const streamModelResponse = ({ modelId, messages }: ChatRequest): Response => {
   const timer = createResponseTimer(modelId);
 
   const result = streamText({
