@@ -222,6 +222,8 @@ The dark ladder, which is the design's home: page `oklch(0.19 0.014 55)`, card `
 
 **Motion is close to nothing on purpose.** Streaming text just appears, with a caret, no shimmer chrome over the top of the actual product moment. Skeletons appear only where there is a genuine wait with a known shape, the leaderboard table on first load. Transitions cap at 150ms and `prefers-reduced-motion` removes them entirely.
 
+_Amended during hardening, and recorded rather than quietly edited:_ "the instrument strip settle is the only animation in the app" now has exactly one exception, the skeleton breathe, and the "known shape" clause turned out to be the load-bearing half of this rule rather than the throwaway half. Both are argued in [the skeleton entry under Hardening](#loading-states-that-hold-the-screens-shape).
+
 **The accessibility floor, which is a gate and not an aspiration:** body text at 4.5:1 and borders and large text at 3:1, in both modes; a 2px rust focus ring with a 2px offset visible on every interactive element in both modes, and `outline: none` never appears without a replacement ring in the same rule; full keyboard operation of the toggle, the picker, and the vote buttons; color never the sole carrier of meaning, per the rust-versus-red hazard above.
 
 **What "build it" means here is the token layer plus one throwaway page that proves it.** No feature screens, those belong to features 5 through 9. The proof page replaces the `create-next-app` contents of `app/page.tsx` and shows, on one screen, the surface ladder, the type scale, buttons in every state including focus, a fake response card with mono metrics, a fake leaderboard row with the win-rate bar, a winner badge, and an error state, in both themes. It exists because "check by eye that a button never blends into the page" is not something reading CSS can answer. Feature 6 and 9 delete it when the real screens land.
@@ -635,6 +637,92 @@ Typecheck, lint, `format:check` and a real production build all pass. Against `n
 - [x] Verified boundary wiring, frame survival, and no leaked exception against `next start` with a throwing route
 - [ ] **Needs a person:** pull the Vercel runtime logs for 18:34–18:36Z on 2 August 2026 and match the React digest, to name what actually threw
 - [ ] **Needs a person:** eye-check both boundary screens in a real browser, in light and dark, and confirm the retry/reload button is keyboard-operable
+
+### A new thread's first answer never appeared until a reload
+
+_Triggered by real use, reported by hand._ On a brand-new thread, the first prompt produced nothing on screen — the models streamed, the answers persisted, but the arena sat at "Thinking…" (or at the empty hero) until the page was reloaded, at which point the full answer was there. Every follow-up in that same thread then streamed live and instantly. The Next dev indicator showed rendering activity throughout the dead window.
+
+Two separate defects, stacked, both in the new-thread hand-off recorded in feature 6 — "create the durable record, then stream", with a navigation in between. That decision is still right and stands; what was wrong was how the navigation was carried out.
+
+#### Decided
+
+**The racing `router.refresh()` is the bug, and it moves into the server action.** `handleSend` fired `router.push('/t/[threadId]')` and `router.refresh()` back to back, unawaited. `push` starts one RSC request for the destination; `refresh` starts a second for whatever the router still considers the current URL, and there is no ordering guarantee between them. Whichever landed second replaced the page segment's cache node — discarding the `ArenaScreen` that had just mounted on `/t/[threadId]`, fired its effect, and opened the three `POST /api/chat` streams. The requests kept running and `markModelResponseComplete` still wrote every row, which is exactly why a reload showed a finished answer: the stream was never the problem, the tree holding its output was thrown away. The symptom was invisible on follow-ups because a follow-up never navigates.
+
+The fix is that nothing in the arena calls `router.refresh()` any more. `startTurn` calls `revalidatePath("/", "layout")` itself, so the invalidation travels back with the action's own response and is already in hand before the browser navigates — one navigation, nothing to race. `"layout"` because the only stale thing is the shell layout's sidebar, which every screen shares. _The cost, accepted deliberately:_ path revalidation also drops the hour-long fetch cache in `fetch-model-catalog.ts` for those paths, so the next render pays one extra OpenRouter round trip. That is once per prompt sent, not once per render, and per-render is the cost that cache was added to avoid.
+
+This also strictly improves the follow-up path, which previously fired `refresh()` _after_ appending the new turn — i.e. re-rendering the whole tree while three streams were open. It happened to be survivable there (same route, same position, so React reconciled rather than remounted) but it was the same hazard waiting on a worse day. Now the fresh tree lands before the turn is appended.
+
+**A `loading.tsx` for the whole `(shell)` group, because the second defect was that nothing rendered at all during the navigation.** There was no `loading.tsx` and no `Suspense` boundary anywhere under `app/`, and every route in the group is dynamic — Clerk's `auth()`, the thread and leaderboard queries, the catalog, plus the Arcjet decision round trip that `proxy.ts` runs in front of `/t/`. So `push` blocked completely on a real server render with the previous screen held frozen, which is what made "nothing happened" the honest reading of the UI. This is the part that produced the visible rendering indicator with no visible change.
+
+It shipped as one file for four screens carrying a single "Loading…" sentence, which fixed the frozen-screen defect and was immediately the wrong answer visually. Superseded within the day by [the skeleton entry below](#loading-states-that-hold-the-screens-shape), which is where the real reasoning about shape now lives. What survives from this step, and is still the load-bearing part, is that the boundary sits beside the shell layout rather than inside a screen, so the sidebar and top bar stay rendered and interactive and only the content area is ever in a loading state.
+
+#### What got built
+
+- `features/arena/start-turn.ts`, `revalidatePath("/", "layout")` on success, with the race and the cache trade-off recorded in place.
+- `features/arena/arena-screen.tsx`, both `router.refresh()` calls removed; the new-thread branch is a bare `push`. The module comment now records why a turn in flight must never have its tree swapped.
+- `app/(shell)/loading.tsx`, the group-wide boundary — reshaped per route by the next entry.
+
+#### Verified
+
+Typecheck, lint, `format:check` and a real production build all pass. Against the running server, the RSC payload for a shell route now carries a populated `loading` slot pointing at `(shell)/loading.tsx` — it was absent before — and that slot is a sibling of the layout's `children` slot, which is what confirms the frame survives and only the content area swaps. The `Loading…` text and `aria-live="polite"` are both really in the payload rather than only in a client chunk.
+
+- [x] Diagnose the actual mechanism, without changing code first
+- [x] `startTurn` revalidates the shell layout; both `router.refresh()` calls removed
+- [x] `(shell)/loading.tsx`, frame-preserving _(route-agnostic at first, reshaped by the next entry)_
+- [x] Typecheck, lint, `format:check` and a real production build all pass
+- [x] Verified the loading boundary is wired to the shell segment and preserves the frame, against a running server
+- [ ] **Needs a person:** send a first prompt on a brand-new thread in a real browser and confirm the answer streams live, with no reload. In DevTools → Network, confirm there is now exactly **one** `?_rsc=` request after send, and exactly **one** trio of `POST /api/chat` calls, not two.
+- [ ] **Needs a person:** confirm a follow-up in that same thread still streams live, and that the sidebar shows the new thread and its recency grouping without a hard reload.
+- [ ] **Needs a person:** eye-check the loading sentence in both themes, and confirm the sidebar stays operable while a screen loads.
+- [ ] **Not installed:** `frontend-design` did not fire for `loading.tsx`; revisit if that screen ever grows past a sentence.
+
+### Loading states that hold the screen's shape
+
+_Follow-up to the entry above, asked for directly:_ the single "Loading…" sentence fixed the frozen screen but looked cheap, and a skeleton was asked for instead.
+
+#### Decided
+
+**Feature 4 had already decided this, and re-reading it is what settled the design rather than taste.** Its motion rule permits a skeleton "only where there is a genuine wait with a known shape, the leaderboard table on first load". That clause disqualifies the sentence _and_ disqualifies one shared skeleton: four screens with four different layouts have four different known shapes, and a single fallback would be shaped wrongly for at least three of them. So each route carries its own, mirroring the real geometry of the screen it stands in for — same container width, same column widths, same bordered surface, same composer height — so nothing jumps when the real screen replaces it.
+
+**Static text renders for real; only what needs data gets blocked out.** The page's name and the table's column headers do not depend on any query, so `Leaderboard`, `Models` and the `.text-eyebrow` headers are the real strings. The moment a skeleton appears you already know which screen you are on and what the columns will hold, and only the numbers are missing. Blocking out a heading that is one known word is precisely what makes a loading state read as generic.
+
+The lead paragraphs are the deliberate exception and stay skeletoned rather than duplicated. They are real copy owned by the screen components, and a second hand-maintained copy inside a `loading.tsx` would drift the first time someone edited one and not the other.
+
+**The breathe is an amendment to feature 4's motion rule, and it was asked rather than assumed.** Feature 4 says the instrument strip's settle is the only animation in the app; this adds a second, a slow opacity breathe on skeleton blocks only. The argument for it: a dim block that never moves does not read as content arriving, it reads as content that failed, which is the opposite of what a loading state owes someone waiting. It is opacity-only and 1.6s so it cannot compete with the strip's 150ms settle — the strip is still where all the motion boldness is spent — and the existing `prefers-reduced-motion` reset already stops it dead. Feature 4's own text has been amended in place rather than left to contradict the code.
+
+**One `.skeleton` class in `globals.css`, owning colour and breathe but not shape.** It appears across five files, which is the "same handful of classes in three places is a component" rule by a wide margin. It sets `bg-muted` and the animation; width, height and radius stay per-instance, because those belong to whatever the block is standing in for. Pointedly not `.measure-bar`, which already means "a number drawn to scale" — a thing you can read, where a skeleton is the absence of a thing.
+
+**The skeleton markup lives in the feature, not in `app/`.** `arena-skeleton.tsx` sits beside `arena-screen.tsx` so the two change in the same commit when the layout moves, which is the folder-by-feature rule doing real work. The `loading.tsx` files are one-line re-exports. The arena's composer shell is shared between the root and the thread route from that one module rather than copied into two route files.
+
+**The whole visual scaffold is `aria-hidden` behind one `sr-only` sentence.** A skeleton is decoration that announces a wait; read aloud, a table of empty cells is worse than no table. The sentence is the honest version of the same information, which is also why the scaffold uses grids rather than `<table>` — no fake table semantics to hide.
+
+_Note on process:_ `frontend-design` never fired because it is installed against a different project (`DevTrack`), not this one. Per `CLAUDE.md` it was read and followed directly from disk instead of assumed active. Its "spend your boldness in one place" is the reason the breathe is the only liberty taken here and the palette, radius and border treatment are entirely feature 4's.
+
+#### What got built
+
+- `app/globals.css`, the `.skeleton` component class and its `skeleton-breathe` keyframes.
+- `features/arena/arena-skeleton.tsx`, `ArenaSkeleton` and `ThreadSkeleton` over a shared composer shell.
+- `features/leaderboard/leaderboard-skeleton.tsx` and `features/models/models-skeleton.tsx`, each mirroring its own table's real column widths.
+- Four `loading.tsx` files: `(shell)/`, `(shell)/t/[threadId]/`, `(shell)/leaderboard/`, `(shell)/models/`.
+
+#### Verified
+
+Typecheck, lint, `format:check` and a real production build all pass.
+
+**The served CSS was inspected rather than the source, which is the only check that can catch this class of mistake:** Tailwind emits _nothing at all_ for a utility it does not recognise, so an arbitrary-value class that never compiled would have failed silently and looked like a layout bug. In the production bundle, `.skeleton` resolves to `background-color:var(--muted)` with `animation:1.6s ease-in-out infinite skeleton-breathe`, the keyframes are emitted, both arbitrary grid templates resolved to the exact intended column widths (`3rem 1fr 14rem 9rem 8rem` and `1fr 6rem 12rem`), and `min-w-3xl` resolved to `--container-3xl: 48rem`, matching the real leaderboard table rather than silently collapsing. `--muted` resolves in both modes with hex fallbacks, `#efeae4` light and `#2b221c` dark.
+
+**The reduced-motion escape hatch was confirmed to actually win, not just to exist.** The `prefers-reduced-motion` block sets `animation-duration:.01ms!important` and `animation-iteration-count:1!important` on `*`, and it is emitted _after_ `.skeleton` in the bundle, so both cascade position and `!important` are on its side.
+
+- [x] Decide the approach, and re-read feature 4 before designing rather than after
+- [x] Ask the one real fork (static blocks versus a breathe) instead of assuming it
+- [x] `.skeleton` in `globals.css`, colour and motion only, shape per instance
+- [x] Per-route skeletons mirroring each screen's real geometry
+- [x] Feature 4's motion rule amended in place, not quietly contradicted
+- [x] Typecheck, lint, `format:check` and a real production build all pass
+- [x] Verified in the served CSS: every arbitrary utility compiled, tokens resolve in both modes, reduced-motion genuinely wins
+- [ ] **Needs a person:** navigate to each of the four screens and confirm nothing jumps when the real content replaces the skeleton — the column widths are copied by hand from the real tables and only the eye can confirm they still match.
+- [ ] **Needs a person:** eye-check the block contrast in both themes. `bg-muted` on `bg-card` is one lightness step by design, which is quiet on purpose; confirm it reads as content-arriving and not as an empty box.
+- [ ] **Needs a person:** confirm the breathe stops with OS "reduce motion" on, and that it does not fight the instrument strip's settle when a real answer lands.
 
 ## Not doing right now
 

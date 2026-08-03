@@ -1,6 +1,7 @@
 "use server";
 
 import { auth } from "@clerk/nextjs/server";
+import { revalidatePath } from "next/cache";
 
 import { trackPromptSent } from "@/infrastructure/analytics-events";
 import { MAX_SELECTED_MODELS, MIN_SELECTED_MODELS } from "@/infrastructure/model-catalog";
@@ -133,6 +134,28 @@ export const startTurn = async (input: StartTurnInput): Promise<StartTurnResult>
   });
 
   if (result.ok) {
+    // The sidebar's thread list (feature 7) is read server-side in the shared
+    // shell layout, which a plain client-side `push` to a route the router has
+    // never rendered can serve from its own cache, so a new thread would be
+    // missing from the list it just joined. Revalidating here rather than
+    // calling `router.refresh()` in the browser is deliberate and is the fix
+    // for a real bug: `refresh()` fired straight after `push()` starts a second
+    // RSC request that races the navigation, and whichever lands second
+    // replaces the page segment — which discarded the freshly-mounted arena
+    // that had just opened the model streams. The answer still finished and
+    // still persisted, it just had nowhere on screen left to go, so a brand-new
+    // thread's first turn only appeared after a manual reload. Invalidating
+    // from inside the action instead means the fresh tree arrives with this
+    // action's own response, already in hand before the browser navigates, so
+    // there is one navigation and nothing to race.
+    //
+    // `"layout"` because the stale thing is the shell layout, which every
+    // screen shares. The cost, accepted: this also drops the hour-long fetch
+    // cache in `fetch-model-catalog.ts` for these paths, so the next render
+    // pays one more OpenRouter round trip. That is once per prompt sent, not
+    // once per render, which is the cost that cache exists to avoid.
+    revalidatePath("/", "layout");
+
     trackPromptSent({
       clerkId,
       threadId: result.threadId,

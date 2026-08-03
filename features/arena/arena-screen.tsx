@@ -28,6 +28,15 @@ import type { ResponseState, TurnState } from "./turn-state";
  * fresh page exactly the same way it fires for an in-place follow-up — one
  * mechanism for both, the database is the hand-off.
  *
+ * That hand-off is fragile in exactly one way, and it is why nothing here calls
+ * `router.refresh()`: a refresh is a second RSC request, and one fired
+ * alongside the `push` below raced it and replaced the page segment underneath
+ * the arena that had just opened the streams. The sidebar's reread is
+ * `startTurn`'s job now, revalidated inside the action so the fresh tree
+ * arrives with the action's own response instead of as a competing fetch. The
+ * reasoning is recorded in full there; the rule here is simply that a turn in
+ * flight never has the tree swapped out from under it.
+ *
  * The columns share one bordered container with rules between them rather than
  * floating as three separate cards, because three answers to one prompt are one
  * comparison, not three unrelated things.
@@ -253,12 +262,7 @@ export const ArenaScreen = ({
     }
 
     if (threadId === null) {
-      // The sidebar's thread list (feature 7) is read server-side in the shared
-      // shell layout, which the App Router does not re-run on a plain `push` to
-      // a route it has never rendered. `refresh()` forces that reread so the
-      // new thread shows up without a hard reload.
       router.push(`/t/${result.threadId}`);
-      router.refresh();
       return;
     }
 
@@ -278,10 +282,6 @@ export const ArenaScreen = ({
         })),
       },
     ]);
-
-    // Same reason as above: a follow-up bumps the thread's `updatedAt`, and the
-    // sidebar's recency grouping needs that reread to reflect it.
-    router.refresh();
   };
 
   const handleVote = async (turnId: string, modelResponseId: string) => {

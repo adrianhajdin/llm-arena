@@ -194,6 +194,37 @@
   .measure-bar > span {
     @apply bg-muted-foreground/70 block h-full rounded-full;
   }
+
+  /* Content with a known shape that has not arrived yet.
+
+     Pointedly not `.measure-bar`, which means "a number drawn to scale" and is
+     a thing you can read. A skeleton is the absence of a thing.
+
+     The breathe is a deliberate amendment to feature 4's "the instrument strip
+     settle is the only animation" rule, not an oversight, and it is recorded as
+     a correction in `docs/scope.md`. A dim block that never moves does not read
+     as content arriving, it reads as content that failed, which is the opposite
+     of what a loading state owes the person waiting. It stays opacity-only and
+     slow so it never competes with the strip's settle, which is still where all
+     the motion boldness is spent, and the `prefers-reduced-motion` reset at the
+     bottom of this file stops it dead.
+
+     Size and radius are per-instance: this class owns the colour and the
+     breathe, the shape belongs to whatever it is standing in for. */
+  .skeleton {
+    @apply bg-muted rounded-md;
+    animation: skeleton-breathe 1.6s ease-in-out infinite;
+  }
+}
+
+@keyframes skeleton-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
