@@ -3,9 +3,11 @@ import { auth } from "@clerk/nextjs/server";
 import { unstable_rethrow } from "next/navigation";
 
 import { AppShell } from "@/features/shell/app-shell";
-import { listThreadHistory, type ThreadGroup } from "@/features/shell/thread-history";
+import { listThreadHistory } from "@/features/shell/thread-history";
+import { type ThreadGroup } from "@/features/shell/thread-groups";
 import { ThemeToggle } from "@/features/theme/theme-toggle";
 import { findAppUserId } from "@/infrastructure/current-user";
+import { ThreadHistoryProvider } from "@/infrastructure/thread-history-store";
 
 /**
  * A route group rather than the root layout, because the root layout has to stay
@@ -49,19 +51,29 @@ export default async function ShellLayout({
 }: Readonly<{ children: React.ReactNode }>) {
   const threadGroups = await loadThreadHistory();
 
+  /**
+   * The provider wraps the whole shell rather than just the sidebar, because the
+   * two halves of it sit on opposite sides of this layout: the arena inside
+   * `children` writes to it when a prompt is accepted, and the sidebar reads it
+   * when it draws the thread list. It exists because a first prompt no longer
+   * navigates, so nothing re-runs this server component to pick the new thread
+   * up (`docs/scope.md`).
+   */
   return (
-    <AppShell
-      threadGroups={threadGroups}
-      sidebarFooter={
-        <>
-          <Show when="signed-in">
-            <UserButton />
-          </Show>
-          <ThemeToggle className="ml-auto" />
-        </>
-      }
-    >
-      {children}
-    </AppShell>
+    <ThreadHistoryProvider>
+      <AppShell
+        threadGroups={threadGroups}
+        sidebarFooter={
+          <>
+            <Show when="signed-in">
+              <UserButton />
+            </Show>
+            <ThemeToggle className="ml-auto" />
+          </>
+        }
+      >
+        {children}
+      </AppShell>
+    </ThreadHistoryProvider>
   );
 }

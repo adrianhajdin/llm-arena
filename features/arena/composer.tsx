@@ -15,25 +15,35 @@ import { ModelPicker } from "./model-picker";
 /**
  * The prompt box and the models it will go to.
  *
- * Selection is client state only while a thread doesn't exist yet. Once one
- * does, `locked` carries its fixed models straight from the database, read
- * back by `startTurn` rather than trusted from this component, and the picker
- * disappears: a thread's models are decided at turn one and stay that way for
- * its life (docs/scope.md, feature 6).
+ * Selection is client state, on every thread rather than only a new one. Models
+ * used to be locked at a thread's first turn, which meant this component took a
+ * `locked` prop and hid the picker for the rest of the thread's life; that lock
+ * is gone and `docs/scope.md` records why. `defaultSelection` is now the whole
+ * story — the catalog's default trio for a new thread, or the models a thread's
+ * most recent turn ran, so a follow-up repeats the same cast unless you change
+ * it.
+ *
+ * A model can leave OpenRouter's free list between turns, so an id in
+ * `defaultSelection` is not guaranteed to still exist. Those are reported rather
+ * than silently dropped: a chip that quietly vanishes and a send button that
+ * quietly refuses is the same screen as a broken app.
  *
  * Sending itself, and the turn/stream state it produces, belongs to
  * `ArenaScreen`. This component only ever reports "send this prompt, to these
  * models" upward.
  */
 
-type LockedModel = Readonly<{ id: string; name: string }>;
+type SelectedModel = Readonly<{ id: string; name: string }>;
 
 type ComposerProps = {
   readonly catalog: readonly CatalogModel[] | null;
+  /**
+   * The ids this composer opens with: a thread's latest turn, or the catalog's
+   * default trio for a thread that does not exist yet.
+   */
   readonly defaultSelection: readonly string[];
-  readonly locked: readonly LockedModel[] | null;
   readonly disabled: boolean;
-  readonly onSend: (prompt: string, models: readonly LockedModel[]) => void;
+  readonly onSend: (prompt: string, models: readonly SelectedModel[]) => void;
 };
 
 const RemoveIcon = () => (
@@ -91,7 +101,6 @@ const CatalogUnavailable = () => {
 export const Composer = ({
   catalog,
   defaultSelection,
-  locked,
   disabled,
   onSend,
 }: ComposerProps) => {
@@ -103,29 +112,53 @@ export const Composer = ({
     selectedIds.includes(model.id),
   );
 
+  /**
+   * Ids this thread opened with that the live catalog no longer has. Measured
+   * against `defaultSelection` rather than `selectedIds` so it describes the
+   * thread, and stays stable while you pick replacements, instead of shifting
+   * every time you toggle a chip.
+   */
+  const unavailableCount = defaultSelection.filter(
+    (id) => !(catalog ?? []).some((model) => model.id === id),
+  ).length;
+
+  /**
+   * Every count below is taken from what the catalog actually still offers, and
+   * a toggle prunes the rest away. Counting an id the catalog has dropped is not
+   * a cosmetic error, it is a trap: a thread that opened with three models and
+   * lost two would sit at "3 of 3 selected" with one real chip, refusing to let
+   * you add the replacement you need.
+   */
+  const availableIds = selectedModels.map((model) => model.id);
+
   const toggleModel = (modelId: string) =>
     setSelectedIds((current) => {
-      if (current.includes(modelId)) {
-        return current.length <= MIN_SELECTED_MODELS
-          ? current
-          : current.filter((id) => id !== modelId);
+      const available = current.filter((id) =>
+        (catalog ?? []).some((model) => model.id === id),
+      );
+
+      if (available.includes(modelId)) {
+        return available.length <= MIN_SELECTED_MODELS
+          ? available
+          : available.filter((id) => id !== modelId);
       }
 
-      return current.length >= MAX_SELECTED_MODELS ? current : [...current, modelId];
+      return available.length >= MAX_SELECTED_MODELS
+        ? available
+        : [...available, modelId];
     });
 
-  const atFloor = selectedIds.length <= MIN_SELECTED_MODELS;
+  const atFloor = selectedModels.length <= MIN_SELECTED_MODELS;
 
-  const canSend =
-    !disabled && prompt.trim().length > 0 && (locked ? true : selectedModels.length > 0);
+  const canSend = !disabled && prompt.trim().length > 0 && selectedModels.length > 0;
 
   const submit = () => {
     if (!canSend) return;
 
-    const models =
-      locked ?? selectedModels.map((model) => ({ id: model.id, name: model.name }));
-
-    onSend(prompt, models);
+    onSend(
+      prompt,
+      selectedModels.map((model) => ({ id: model.id, name: model.name })),
+    );
     setPrompt("");
   };
 
@@ -155,17 +188,6 @@ export const Composer = ({
         <div className="mt-2 flex items-end justify-between gap-3">
           {!catalog ? (
             <CatalogUnavailable />
-          ) : locked ? (
-            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-              {locked.map((model) => (
-                <span
-                  key={model.id}
-                  className="border-border text-muted-foreground inline-flex items-center gap-1.5 rounded-full border py-1 pr-2.5 pl-2.5 text-xs"
-                >
-                  {model.name}
-                </span>
-              ))}
-            </div>
           ) : (
             <div className="flex min-w-0 flex-wrap items-center gap-1.5">
               {selectedModels.map((model) => (
@@ -188,7 +210,7 @@ export const Composer = ({
               ))}
               <ModelPicker
                 catalog={catalog}
-                selectedIds={selectedIds}
+                selectedIds={availableIds}
                 onToggle={toggleModel}
               />
             </div>
@@ -216,10 +238,16 @@ export const Composer = ({
           )}
         </div>
       </div>
+      {/* A model leaving the free list is the one case where this line has to
+          do more than reassure. It says which way to go, because the send button
+          is disabled until something answerable is selected and a disabled
+          button that explains nothing is indistinguishable from a broken one. */}
       <p className="text-muted-foreground mx-auto mt-2 max-w-5xl text-center text-xs">
-        {locked
-          ? "This thread's models are fixed. Every one of them is free."
-          : "One to three models at a time. Every one of them is free."}
+        {unavailableCount === 0
+          ? "One to three models at a time. Every one of them is free."
+          : selectedModels.length === 0
+            ? "None of this thread's models are on the free list any more. Pick one to carry on."
+            : `${unavailableCount === 1 ? "One of this thread's models is" : `${unavailableCount} of this thread's models are`} no longer free, so this turn goes to the rest.`}
       </p>
     </div>
   );

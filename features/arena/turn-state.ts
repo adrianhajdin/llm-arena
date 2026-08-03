@@ -20,4 +20,17 @@ export type TurnState = Readonly<{
   id: string;
   prompt: string;
   responses: readonly ResponseState[];
+  /**
+   * True only for the fraction of a second between a prompt being submitted and
+   * `startTurn` coming back with the real row ids. Such a turn is on screen —
+   * the prompt in its bubble, every column reading "Thinking…", which is
+   * honestly what is happening — but its ids are placeholders, so nothing may
+   * open a stream against it yet. The streaming effect skips it for exactly
+   * that reason, and it is replaced wholesale, never patched, the moment the
+   * real ids arrive.
+   *
+   * Absent on every turn loaded from the database, which by definition has real
+   * ids already.
+   */
+  optimistic?: boolean;
 }>;

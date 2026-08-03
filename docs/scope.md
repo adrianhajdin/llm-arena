@@ -377,9 +377,13 @@ Denials never leak an Arcjet reason: 429 with a real retry-after for the bucket,
 
 **Sending a prompt is two steps, in this order: create the durable record, then stream.** A server action opens one transaction that resolves/creates the `User`, creates (or reuses) the `Thread`, creates the `Turn` (the prompt), and creates one `ModelResponse` row per selected model at `STREAMING`. It returns the thread id and each response's id. Only once that comes back does the browser navigate to `/t/[threadId]` and open the model streams. _Asked, because it forks:_ streaming immediately and relocating the URL underneath the in-flight requests would shave the wait for a first token, but risks a stream dying on a client-side route swap for a saving that isn't worth that fragility yet. From a saved thread, sending a follow-up skips the navigation, everything else is identical.
 
+_Reversed during hardening, and the reversal is the interesting part._ "Create the durable record, then stream" still stands and always did. What was dropped is the navigation in the middle: the first prompt no longer goes to `/t/[threadId]` at all, it renders in place and relocates the URL, which is precisely the option this fork rejected. The rejection's stated reason was that relocating the URL under in-flight requests "risks a stream dying on a client-side route swap" — and that turned out to name the real hazard while pinning it on the wrong mechanism. The route swap _was_ the thing that killed streams, twice. Full argument in [the entry below](#the-first-prompt-stops-navigating-at-all).
+
 **Each selected model gets its own `fetch` to `POST /api/chat`, in parallel, and the client parses the stream itself with `ai`'s `readUIMessageStream` rather than `@ai-sdk/react`'s `useChat`.** Three independent per-model conversations, each with its own measured metrics riding in message metadata, don't fit `useChat`'s single-conversation model any better than what's already hand-rolled in `model-response-metrics.ts`, and pulling in a second AI SDK entry point for one hook isn't worth it.
 
 **A thread's models are locked at turn one.** Once a thread exists, the model picker in its composer goes away (or read-only); a follow-up always addresses the same models the thread started with. _Asked, because it forks:_ letting the set change per turn is more flexible but leaves a thread with responses scattered unevenly across models and turns, and "a follow-up continues each model's own separate conversation" reads most literally as one fixed cast for the thread's life.
+
+~~**Locked at turn one.**~~ _Reversed during hardening, by decision._ Models are changeable on any turn. The lock's own consequence is what argued against it: the picker vanishing from the composer read as a broken control rather than an enforced rule, and it was only ever noticed once the first prompt stopped navigating and the disappearance happened in place. The "responses scattered unevenly" worry above is real and was accepted with eyes open — see [the entry below](#models-are-changeable-on-any-turn).
 
 **Persistence happens server-side, inside the route, not from the client after the stream ends.** `stream-model-response.ts` already builds the exact `ModelResponseMetrics` object at finish; that same object is written into the `ModelResponse` row at that moment (upsert on the existing `@@unique([turnId, modelId])`, which is also what makes an in-place retry of a failed model overwrite its row instead of adding a second one). `FAILED` is written from the same `onError` path that already returns the user-facing sentence. An answer survives a closed tab this way; a client-reported "I finished" would not.
 
@@ -723,6 +727,158 @@ Typecheck, lint, `format:check` and a real production build all pass.
 - [ ] **Needs a person:** navigate to each of the four screens and confirm nothing jumps when the real content replaces the skeleton — the column widths are copied by hand from the real tables and only the eye can confirm they still match.
 - [ ] **Needs a person:** eye-check the block contrast in both themes. `bg-muted` on `bg-card` is one lightness step by design, which is quiet on purpose; confirm it reads as content-arriving and not as an empty box.
 - [ ] **Needs a person:** confirm the breathe stops with OS "reduce motion" on, and that it does not fight the instrument strip's settle when a real answer lands.
+
+### The first prompt stops navigating at all
+
+_Triggered by real use, again._ After the redirect was fixed and the skeleton landed, the remaining complaint was latency: a first prompt took 3–4 seconds locally and 7–10 in production before the new thread appeared. The proposal that settled it came from outside the code — "redirect instantly, show the skeleton, fetch after" — which is not literally possible, and pointed straight at the better answer anyway.
+
+**Why the literal version cannot work:** the redirect target is `/t/{threadId}`, and the `threadId` is produced by the very write the redirect is trying to get ahead of. Generating an id client-side and navigating early only moves the failure: the thread page cannot distinguish "not written yet" from "does not exist" and would `notFound()` on the user's own new thread.
+
+#### Measured first
+
+Before deciding, the send path was counted rather than guessed. `pooled.db.prisma.io` answers in **~52ms per round trip** from a dev machine. A first prompt made **~9–10 sequential** round trips: the `user.upsert`, then `BEGIN`, `thread.create`, `turn.create`, three `modelResponse.create`s and `COMMIT` inside one interactive transaction. The three creates are wrapped in `Promise.all` and do **not** parallelise — they share one transaction connection and serialise — which is worth knowing before anyone "optimises" that line. On top of that the catalog is **530KB across 337 models, ~350ms** cold. So roughly 1–2s is accounted for; the rest is cold start and production region distance, which only Vercel's own function logs can settle.
+
+#### Decided
+
+**A regression of ours was on that path, and it went first.** `revalidatePath("/", "layout")` in `startTurn` — added one step earlier in this same hardening pass to fix the sidebar — turned out to be far more expensive than its own note claimed. That note said "the next render pays one more OpenRouter round trip". Wrong placement: a server action that revalidates re-renders the current route and ships that tree back _in the action's own response_, so every prompt waited on a full extra page render plus a cold 530KB catalog refetch that the revalidation had itself just purged, before the caller was even told the turn existed. Then the destination page fetched the catalog cold a second time, for the same reason. Removed outright.
+
+**The first prompt renders in place and relocates the URL with `history.replaceState`.** This is the reversal of feature 6's fork, and the evidence changed in a specific way worth writing down: that fork rejected relocating the URL because it "risks a stream dying on a client-side route swap". The instinct was right and the attribution was backwards. A route swap is exactly what killed the streams — first as the `push`/`refresh` race, then as pure latency, because a redirect cannot begin until the row exists and so every first prompt paid a second full page render before a single token could arrive. `replaceState` performs no route swap at all, which is what makes it the safe option rather than the fragile one. What the fork was protecting against is the thing it chose.
+
+The gains are structural rather than tuned: no destination render, no second cold catalog fetch, no Arcjet proxy hop on the send path, and the streams open roughly a second sooner because they no longer wait on a page render. `/t/[threadId]` is untouched and still serves shared links, reloads and sidebar navigation.
+
+**The turn goes on screen before the round trip, not after.** Removing the navigation alone would still have left the composer looking inert for the length of the write plus any cold start, so a turn is appended immediately with placeholder ids and `optimistic: true`, showing the prompt in its bubble and every column reading "Thinking…", which is honestly what is happening. The streaming effect skips optimistic turns by that flag, because a stream opened against a placeholder `turnId` would be refused by `/api/chat` and would turn a healthy turn into a failed one. When the real ids arrive the turn is replaced wholesale rather than patched, so the ids and the cleared flag land in one commit. A refusal removes it again rather than leaving a prompt on screen the database never accepted.
+
+**`threadId` and `lockedModels` become client state seeded from props.** A brand-new thread starts as `null`/`null` and acquires both mid-session with no navigation to carry them, so from the first send onward the client is the authority on which thread is open. This is also what locks the composer's model picker at turn one without a server round trip.
+
+**The sidebar is now one navigation behind, deliberately.** With no navigation and no revalidation, a thread created this way does not appear in the sidebar's server-rendered list until the next real navigation or reload. Both ways of forcing that reread — `router.refresh()` or a `revalidatePath` — re-render the current route and reapply its tree, which is the exact move that cost us the streams twice already, and after `replaceState` it carries a worse risk: the router may still consider the current route `/`, so reapplying its tree would wipe the on-screen conversation. A sidebar one navigation behind is a much smaller price, and it corrects itself the moment you go anywhere. _This also silently reverts the follow-up `router.refresh()` that fed the sidebar's recency grouping;_ same trade, now consistent across both paths.
+
+#### What got built
+
+- `features/arena/turn-state.ts`, the `optimistic` flag and why nothing may stream against such a turn.
+- `features/arena/arena-screen.tsx`, one send path for both cases; `liveThreadId`/`liveLockedModels` state; `replaceState` passing Next's own history state straight back through so the back button survives; no `router.push` or `router.refresh` anywhere in the file.
+- `features/arena/start-turn.ts`, `revalidatePath` removed, with the reason recorded in place so nobody re-adds it.
+
+#### Verified
+
+Typecheck, lint, `format:check` and a real production build all pass. `/`, `/leaderboard` and `/models` all answer 200 against a running server. Confirmed by grep that no `router.push`, `router.refresh` or `revalidatePath` call survives anywhere in `features/arena/` outside comments and the one noted below.
+
+- [x] Measure the send path before designing anything
+- [x] Remove the `revalidatePath` regression from the action
+- [x] First prompt renders in place; `replaceState` relocates the URL
+- [x] Optimistic turn with placeholder ids, skipped by the streaming effect, replaced wholesale
+- [x] `threadId` and `lockedModels` become client state
+- [x] Feature 6's fork amended in place with the changed evidence
+- [x] Typecheck, lint, `format:check` and a real production build all pass
+- [ ] **Needs a person, and this is the whole point:** send a first prompt on a brand-new thread. The prompt and three "Thinking…" columns should appear instantly, the URL should become `/t/{id}` with no page transition, and tokens should arrive noticeably sooner than before. Time it against the old 7–10s.
+- [ ] **Needs a person:** confirm `replaceState` interop — reload the page mid-stream and after, and check the back button goes where you came from rather than to a blank `/`. This is the main technical risk in the change.
+- [ ] **Needs a person:** confirm exactly one trio of `POST /api/chat` per turn in DevTools, and no request carrying an `optimistic-…` turn id.
+- [ ] **Needs a person:** confirm the sidebar picks up the new thread on the next navigation, and decide whether one-navigation-behind is acceptable or worth solving properly (a client-side sidebar update is the safe way, and it is cross-feature plumbing a route would have to compose).
+- [ ] **Known sharp edge:** `composer.tsx`'s catalog-failure "Try again" button still calls `router.refresh()`. It is user-initiated and only renders when the catalog is unavailable, so nothing is normally in flight, but after `replaceState` it is the one remaining path that could reapply the wrong tree. Left alone rather than changed unasked.
+- [ ] **Unrelated, found while measuring:** `listThreadHistory` selects every thread → every turn → every response to compute a distinct model count, and Prisma runs nested selects as separate queries. It grows with every prompt ever sent. Not on the send path any more, but it is on every shell render.
+- [ ] **Unrelated, found while measuring:** `ARCJET_MODE` is set in `.env.local` but is absent from the env schema and read nowhere; the rules are hardcoded `mode: "LIVE"`.
+
+### Models are changeable on any turn
+
+_Reported as a bug, and it was a real one underneath._ "In the prompt input box, the add model button is gone." It was gone on purpose — models were locked at turn one, so the picker was replaced by plain chips once a thread existed. What made it read as breakage rather than a rule is the previous entry: the first prompt no longer navigates, so the picker now vanishes _in place_, under the cursor, with no page change to explain it. A rule you only discover by watching a control disappear is not a rule anybody was told.
+
+Given the choice between signposting the lock and removing it, the lock went.
+
+#### Decided
+
+**The database always allowed this, which is what made it cheap.** `ModelResponse` rows hang off a `turnId` with their own `modelId`, unique on `[turnId, modelId]`. A thread whose first turn ran three models and whose fourth runs a different three was always representable — no migration, no schema change. The lock was application policy in two places (`startTurn` reading models back out of prior turns, and the composer hiding its picker) and nothing more.
+
+**`startTurn` stops deriving models from prior turns and trusts the caller's ids.** This deletes a `modelResponse.findMany` from every follow-up, so the change makes sending marginally faster rather than slower.
+
+**The `MIN`/`MAX` check now runs on every turn.** It used to be gated on `threadId === null`, which was correct while a follow-up's models came from the database and wrong the moment they come from the caller — an unchecked follow-up could ask for none or for fifty.
+
+**Submitted ids are resolved against the live free catalog, not merely validated.** The stored `modelName` is the catalog's own; `StartTurnModel.name` is now read nowhere on the server. The browser still sends it because it needs the name locally to render the turn, and the server discards it. Fails closed like `/api/chat`: a catalog we cannot read is not permission to record a turn against models we cannot vouch for.
+
+_This reverses advice given one message earlier in the same conversation, and the reversal is the honest part._ Validating here was first dismissed as putting latency back on the send path. That was reasoning from a world that had just been deleted: while `revalidatePath` was purging the catalog's fetch cache on every send, every read was cold and cost a 530KB round trip. With that gone the catalog is cached for an hour and read on every page render, so it is warm virtually always and this check costs approximately nothing.
+
+**Ids are deduplicated before they are counted.** Not tidiness: `@@unique([turnId, modelId])` means the same id twice fails the insert and surfaces as a raw database error, which this app never shows anyone. The UI cannot produce a duplicate; a hand-written request can.
+
+**A model that has left the free list is explained, not silently dropped.** The composer matches its selection against the live catalog, so an id that is gone simply produces no chip. Left alone that is a thread whose composer shows fewer models than it ran and a send button that refuses with no reason given — indistinguishable from a broken app. So the footer line says what happened and what to do, and there are two versions because the situations differ: some models lost, and every model lost.
+
+Counting those dead ids was also a trap worth recording. Floor and cap were computed from `selectedIds`, which still contained them, so a thread that opened with three models and lost two would sit at "3 of 3 selected" showing one chip, and refuse to let you add the replacement you needed. Every count now comes from what the catalog actually offers, and a toggle prunes the rest away.
+
+**The composer opens on the thread's _most recent_ turn's models**, so a follow-up repeats the same cast unless you change it. The first turn's set would be the wrong default the moment someone has already swapped something.
+
+**Accepted with eyes open:** feature 6's "responses scattered unevenly across models and turns" is now possible, and a model added at turn three genuinely has no answers for turns one and two. `buildModelMessages` already handled exactly this shape — it feeds a model the prompts plus only its _own_ completed answers — because it had to cope with a model that failed a turn. So a newly added model sees the conversation's questions but claims no answers it never gave, which is the honest reading.
+
+**No Arcjet or PostHog coverage changed.** Asked directly and checked rather than assumed: `shield`, the `/api/chat` bot rule and token bucket, and the `/t/` sliding window are all untouched, and the bucket still spends one token per model call regardless of which models. Every funnel event still fires, and `prompt_sent` gets _better_ data — it already carried `modelIds` and `modelCount`, which now records a real per-turn cast instead of a value that was constant for a thread's life.
+
+#### What got built
+
+- `features/arena/start-turn.ts`, caller-chosen models on every turn, dedupe, always-on count check, catalog resolution, and the `findMany` deleted.
+- `features/arena/composer.tsx`, the `locked` prop and its branch gone, picker always present, counts taken from available models only, and the unavailable-model explanation.
+- `features/arena/arena-screen.tsx`, `lockedModels` prop and `liveLockedModels` state both removed — the composer owns selection now, so there is nothing to hand back and forth.
+- `app/(shell)/t/[threadId]/page.tsx`, opens the composer on the latest turn's models.
+
+#### Verified
+
+Typecheck, lint, `format:check` and a real production build all pass. Confirmed by grep that the only surviving `locked` identifier is `model-picker.tsx`'s local floor/cap flag, which is a different idea, and that the Arcjet and PostHog call sites are all still in place.
+
+- [x] Decide the approach, and surface the contradiction with feature 6 rather than working around it
+- [x] Unlock models per turn; delete the derived-from-prior-turns lookup
+- [x] `MIN`/`MAX` on every turn; dedupe ids; resolve names from the catalog
+- [x] Explain an unavailable model instead of dropping it silently
+- [x] Fix the floor/cap trap that counted models the catalog no longer has
+- [x] Feature 6's lock amended in place, with the accepted cost written down
+- [x] Confirm no Arcjet or PostHog coverage was lost
+- [x] Typecheck, lint, `format:check` and a real production build all pass
+- [ ] **Needs a person:** on an existing thread, swap a model and send. The new model should answer, and the old turns should still render with their own model sets.
+- [ ] **Needs a person:** confirm the new model's answer reads sensibly given it has no prior answers of its own — this is the accepted cost above, and it is worth seeing once on a real thread before trusting it.
+- [ ] **Needs a person, hard to stage:** the unavailable-model path only triggers when a model actually leaves OpenRouter's free list, so it cannot be exercised on demand. The message wording is unverified against a real occurrence.
+- [ ] **Still open from the previous entry:** `replaceState` interop — the breadcrumb, standings strip and `thread_link_copied` property read `usePathname()`, which Next documents as syncing with `replaceState` but which remains unconfirmed here.
+
+### The sidebar catches up without a server round trip
+
+_The accepted cost from two entries up, un-accepted._ Removing the navigation left the sidebar's thread list one navigation behind: a brand-new thread was open on screen and absent from the list beside it until a reload. That was recorded as a deliberate trade and it was the wrong call — sending one prompt and then clicking "New thread" means never seeing your first thread at all.
+
+#### Decided
+
+**The browser reports what it did; the server list stays the truth.** Both ways of forcing a reread — `router.refresh()` or a `revalidatePath` — re-render the current route and reapply its tree, and that is the single mechanism that has broken the arena twice in this hardening pass. So nothing is refreshed. A small client store holds "threads this browser has sent to", and the sidebar folds that into whatever the last server render gave it.
+
+_A correction to the analysis that chose this._ The case against `router.refresh()` was first put as "it would wipe the on-screen conversation", which overstates it: `refresh()` preserves client component state rather than remounting, which is exactly why the old follow-up refresh never killed a stream. The real objection is narrower and still decisive. After `replaceState` it is unverified whether the router considers the URL `/t/{id}` or still `/`; if the latter, it refetches `/`, and whether React then preserves `ArenaScreen` or remounts it depends on page-segment keys. Remounting resets `turns` and the conversation vanishes from screen while sitting safely in the database — which is precisely the first bug reported in this pass. Most likely `refresh()` is fine. "Most likely" is not the standard for the one area with a two-for-two failure record, and it cannot be settled here because this project has no browser automation by decision.
+
+**Two jobs, because the second was nearly missed.** The obvious job is adding a thread the list does not have. The sibling symptom, found while weighing the options rather than after shipping, is recency: a follow-up bumps `updatedAt`, so a month-old thread should jump from "Earlier" to "Today", and a fix that only handled new threads would have left that broken. `router.refresh()` would have got it for free. So the arena reports **every** send, not only the one that creates a thread, and the merge both adds and promotes.
+
+**Server data wins wherever it exists, which is what makes this self-cleaning.** The store's `modelCount` counts only the turn just sent, where the server counts every model across the whole thread. So the merge prefers the server's row whenever it has one, and uses the caller's values only for a thread the server has never mentioned — exactly the case where they are complete and correct. The consequence worth stating: the moment any navigation brings the real list back, the fold-in becomes a no-op instead of a second copy. Nothing has to remember to clear it.
+
+**The store lives in `infrastructure/`, and that is the rule rather than a preference.** `features/arena` writes to it and `features/shell` reads it, and a feature may not import another feature. `docs/coding-standards.md` names this case exactly: "if two features need the same thing, it belongs in `infrastructure/`". No route plumbing, no callback threaded through props.
+
+**`thread-history.ts` split in two, the same way `model-catalog.ts` is.** It was `server-only` because it queries Postgres, but the sidebar is a client component and needs the same recency labels the query sorts into. Duplicating `"Today"` into client code would be a string that could drift from the grouping that produced it, so the shapes, the labels and the merge moved to `thread-groups.ts` with no `server-only` mark, and the query kept the rest. This also fixed something latent: `app-shell.tsx` had been importing `ThreadGroup` as a type _from the `server-only` module_, which worked only because types are erased.
+
+**`startTurn` returns the title it stored.** The rule is "first 80 characters of the first prompt", and the browser now needs the title to draw the row. Returning it keeps that rule in one place instead of reimplementing `prompt.slice(0, 80)` client-side where it could quietly diverge.
+
+**A missing provider degrades to a no-op rather than throwing.** The context defaults to an empty store with a do-nothing writer. Crashing the arena because a sidebar convenience was not wired is not a trade worth making.
+
+#### What got built
+
+- `infrastructure/thread-history-store.tsx`, the client store: most-recent-first, one entry per thread, no-op default.
+- `features/shell/thread-groups.ts`, the pure half — shapes, labels, `groupLabel`, and `mergeTouchedThreads`.
+- `features/shell/thread-history.ts`, now just the query.
+- `features/shell/sidebar.tsx`, renders the merged list; `features/shell/app-shell.tsx`, type import repointed at the pure module.
+- `app/(shell)/layout.tsx`, wraps the whole shell so the writer inside `children` and the reader in the sidebar share one store.
+- `features/arena/arena-screen.tsx` reports every send; `features/arena/start-turn.ts` returns `threadTitle`.
+
+#### Verified
+
+Typecheck, lint, `format:check` and a real production build all pass.
+
+**The merge is pure, so it was actually exercised rather than reasoned about** — seven cases, all passing: an untouched list is returned identically and no empty "Today" is invented; a brand-new thread appears under Today; a thread the server already lists produces no duplicate and keeps the server's title and count over the client's; a touched thread moves out of "Earlier" into "Today"; its old group survives if other threads remain and is dropped if not; touched threads order most-recent-first ahead of the server's own Today rows; and Today always leads while later groups keep server order. Run as a one-off script against the real module in the session scratchpad — no test runner was added, per `CLAUDE.md`.
+
+- [x] Decide the approach, and correct the overstated case against `router.refresh()`
+- [x] Catch the recency-regrouping sibling symptom before shipping rather than after
+- [x] Client store in `infrastructure/`, per the two-features rule
+- [x] Split `thread-history.ts` into pure and `server-only` halves
+- [x] `startTurn` returns the stored title so the 80-character rule has one home
+- [x] Verified the merge against seven real cases, including self-cleaning
+- [x] Typecheck, lint, `format:check` and a real production build all pass
+- [ ] **Needs a person:** send a first prompt on a new thread and confirm the row appears in the sidebar immediately, with the prompt as its title and no reload.
+- [ ] **Needs a person:** send a follow-up to an older thread and confirm it moves up to "Today".
+- [ ] **Needs a person:** then navigate to `/leaderboard` and back, and confirm the row is still there exactly once — this is the self-cleaning path, and a duplicate here is the one failure mode the unit checks cannot see.
+- [ ] **Still open, and it will be visible here:** the new sidebar row's active highlight uses `usePathname()`, which is the unverified `replaceState` sync question from two entries up. The row may appear correctly but not be highlighted until a real navigation.
 
 ## Not doing right now
 
