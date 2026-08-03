@@ -94,20 +94,30 @@ export default async function ThreadPage({
     })),
   }));
 
-  const lockedModels =
-    initialTurns[0]?.responses.map((response) => ({
-      id: response.modelId,
-      name: response.modelName,
-    })) ?? null;
+  /**
+   * The composer opens on the models this thread's *most recent* turn ran, so a
+   * follow-up repeats the same cast unless you change it. The first turn's set
+   * would be the wrong default the moment someone has already swapped a model,
+   * which they may now do on any turn (docs/scope.md, feature 6 as amended).
+   *
+   * Falls back to the catalog's default trio only for a thread with no turns,
+   * which the composer would otherwise have nothing to open with.
+   */
+  const latestTurnModels = initialTurns.at(-1)?.responses.map((r) => r.modelId) ?? [];
 
   return (
     <ArenaScreen
       catalog={catalog}
-      defaultSelection={catalog ? defaultModelSelection(catalog) : []}
+      defaultSelection={
+        latestTurnModels.length > 0
+          ? latestTurnModels
+          : catalog
+            ? defaultModelSelection(catalog)
+            : []
+      }
       onCastVote={castVoteAction}
       threadId={thread.id}
       initialTurns={initialTurns}
-      lockedModels={lockedModels}
       isOwner={isOwner}
     />
   );

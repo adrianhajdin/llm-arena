@@ -6,9 +6,10 @@ import { usePathname } from "next/navigation";
 import { type ReactNode } from "react";
 
 import { cn } from "@/infrastructure/ui";
+import { useThreadHistory } from "@/infrastructure/thread-history-store";
 
 import { ArenaIcon, LeaderboardIcon, ModelsIcon, PlusIcon } from "./icons";
-import { type ThreadGroup } from "./thread-history";
+import { mergeTouchedThreads, type ThreadGroup } from "./thread-groups";
 
 const NAV = [
   { href: "/", label: "Arena", Icon: ArenaIcon },
@@ -41,6 +42,13 @@ export const Sidebar = ({
   /* `Show` is server-only in Clerk 7, and this list has to react to the drawer
      and the current route, so the signed-in state comes from the hook. */
   const { isLoaded, isSignedIn } = useAuth();
+
+  /* `threadGroups` is whatever the last server render of the shell layout
+     produced. A first prompt no longer navigates, so a thread can be open on
+     screen and absent from that list; this folds in what the browser knows and
+     becomes a no-op again as soon as any navigation refreshes the real thing. */
+  const { touched } = useThreadHistory();
+  const groups = mergeTouchedThreads(threadGroups, touched);
 
   return (
     <div className="flex h-full flex-col">
@@ -112,14 +120,14 @@ export const Sidebar = ({
             </div>
           )}
 
-          {isSignedIn && threadGroups.length === 0 && (
+          {isSignedIn && groups.length === 0 && (
             <p className="text-muted-foreground px-2.5 py-3 text-sm leading-relaxed">
               Nothing yet. Send a prompt to start your first thread.
             </p>
           )}
 
           {isSignedIn &&
-            threadGroups.map((group) => (
+            groups.map((group) => (
               <section key={group.label} className="mb-4 last:mb-0">
                 <h3 className="text-muted-foreground px-2.5 py-1.5 text-xs">
                   {group.label}

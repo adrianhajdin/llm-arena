@@ -1,10 +1,10 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import posthog from "posthog-js";
 import { useEffect, useRef, useState } from "react";
 
 import { type CatalogModel } from "@/infrastructure/model-catalog";
+import { useThreadHistory } from "@/infrastructure/thread-history-store";
 import { cn } from "@/infrastructure/ui";
 
 import { Composer } from "./composer";
@@ -19,14 +19,30 @@ import type { ResponseState, TurnState } from "./turn-state";
  * streaming and failing on its own request, voted on once two or more have
  * answered.
  *
- * State lives here, not in the composer, because a turn outlives the input
- * that created it. The one subtlety is how a brand-new thread gets its first
- * turn onto the screen: `startTurn` returns before any model has been called,
- * this component navigates to `/t/[threadId]`, and the destination page loads
- * that turn's `STREAMING` rows straight from the database. The effect below,
- * which opens a stream for every `STREAMING` response, then fires on that
- * fresh page exactly the same way it fires for an in-place follow-up — one
- * mechanism for both, the database is the hand-off.
+ * State lives here, not in the composer, because a turn outlives the input that
+ * created it. And there is exactly one path through this component, whether the
+ * thread is brand-new or twenty turns old: put the turn on screen, ask
+ * `startTurn` for its real ids, open a stream per model. A first prompt is a
+ * follow-up that happens to also change the address bar.
+ *
+ * That is a reversal of an earlier decision — the first prompt used to navigate
+ * to `/t/[threadId]` and let the destination page load its own `STREAMING` rows
+ * — and the reason is recorded in `docs/scope.md`. Twice now the navigation has
+ * been the thing that broke: once when a racing `router.refresh()` replaced the
+ * page segment out from under the arena that had just opened the streams, and
+ * again as plain latency, because a redirect cannot happen until the row exists,
+ * so every first prompt paid a full second page render before a single token
+ * could arrive. Removing the navigation removes both. Nothing in this file calls
+ * `router.push` or `router.refresh` any more, and that is the invariant: a turn
+ * in flight never has the tree swapped out from under it.
+ *
+ * The cost, accepted deliberately: the sidebar's thread list is server-rendered
+ * in the shell layout, so a thread created this way does not appear in it until
+ * the next real navigation or reload. Forcing that reread is what a `refresh()`
+ * or a `revalidatePath` would do, and either one re-renders the current route
+ * and reapplies its tree — the exact move that cost us the streams before. A
+ * sidebar one navigation behind is a far smaller price than that, and it
+ * corrects itself the moment you go anywhere.
  *
  * The columns share one bordered container with rules between them rather than
  * floating as three separate cards, because three answers to one prompt are one
@@ -133,7 +149,7 @@ const ResponseColumn = ({
   </article>
 );
 
-type LockedModel = Readonly<{ id: string; name: string }>;
+type SelectedModel = Readonly<{ id: string; name: string }>;
 
 /**
  * Casting a vote is `features/voting`'s own logic, so this component never
@@ -153,8 +169,6 @@ type ArenaScreenProps = {
   readonly threadId?: string | null;
   /** Turns already saved for this thread, in order. Empty for a new arena. */
   readonly initialTurns?: readonly TurnState[];
-  /** This thread's fixed models, derived from its own first turn. */
-  readonly lockedModels?: readonly LockedModel[] | null;
   /**
    * Whether the person looking at this screen is the thread's real owner.
    * Always `true` for a brand-new thread, since whoever starts one is
@@ -171,15 +185,34 @@ export const ArenaScreen = ({
   onCastVote,
   threadId = null,
   initialTurns = [],
-  lockedModels = null,
   isOwner = true,
 }: ArenaScreenProps) => {
-  const router = useRouter();
   const [turns, setTurns] = useState<readonly TurnState[]>(initialTurns);
   const [pending, setPending] = useState(false);
   const [votingTurnId, setVotingTurnId] = useState<string | null>(null);
   const [sendError, setSendError] = useState<string | null>(null);
   const inFlight = useRef<Set<string>>(new Set());
+
+  /**
+   * The thread this screen is writing to. Arrives as a prop and then becomes
+   * this component's own, because a brand-new thread starts life as `null` and
+   * acquires a real id mid-session without a navigation. From the first send
+   * onward the client is the authority on which thread is open, not the route
+   * that rendered it.
+   *
+   * The models are deliberately not tracked here. They are the composer's own
+   * state now that a thread no longer fixes them at turn one, so there is
+   * nothing for this component to hold or hand back.
+   */
+  const [liveThreadId, setLiveThreadId] = useState<string | null>(threadId);
+
+  /**
+   * The sidebar's list comes from a server render of the shell layout, which
+   * nothing re-runs now that a first prompt does not navigate. Reporting the send
+   * here is what lets a brand-new thread appear in that list, and what pulls an
+   * older thread up to today when it gets a follow-up.
+   */
+  const { noteThreadTouched } = useThreadHistory();
 
   const updateResponse = (
     turnId: string,
@@ -208,6 +241,11 @@ export const ArenaScreen = ({
     if (!isOwner) return;
 
     turns.forEach((turn, turnIndex) => {
+      // Its ids are placeholders until `startTurn` answers. Opening a stream
+      // against one would send a `turnId` no row exists for, and `/api/chat`
+      // would rightly refuse it — turning a turn that is fine into a failed one.
+      if (turn.optimistic) return;
+
       turn.responses.forEach((response) => {
         if (response.status !== "STREAMING") return;
         if (inFlight.current.has(response.id)) return;
@@ -234,43 +272,30 @@ export const ArenaScreen = ({
     // Fires once per page load, for a real thread someone other than its
     // owner opened, the only way to tell whether sharing a link actually
     // gets viewed rather than just proving the link works.
-    if (isOwner || threadId === null) return;
+    if (isOwner || liveThreadId === null) return;
 
-    posthog.capture("public_thread_viewed", { threadId });
-  }, [isOwner, threadId]);
+    posthog.capture("public_thread_viewed", { threadId: liveThreadId });
+  }, [isOwner, liveThreadId]);
 
-  const handleSend = async (prompt: string, models: readonly LockedModel[]) => {
+  const handleSend = async (prompt: string, models: readonly SelectedModel[]) => {
     setPending(true);
     setSendError(null);
 
-    const result = await startTurn({ threadId, prompt, models });
-
-    setPending(false);
-
-    if (!result.ok) {
-      setSendError(result.error);
-      return;
-    }
-
-    if (threadId === null) {
-      // The sidebar's thread list (feature 7) is read server-side in the shared
-      // shell layout, which the App Router does not re-run on a plain `push` to
-      // a route it has never rendered. `refresh()` forces that reread so the
-      // new thread shows up without a hard reload.
-      router.push(`/t/${result.threadId}`);
-      router.refresh();
-      return;
-    }
+    // On screen before the round trip, not after it. The prompt and a column
+    // per model appear the instant the button is pressed; only the ids are
+    // missing, and nothing needs them until the streams open.
+    const optimisticId = `optimistic-${crypto.randomUUID()}`;
 
     setTurns((current) => [
       ...current,
       {
-        id: result.turnId,
+        id: optimisticId,
         prompt,
-        responses: result.responses.map((response) => ({
-          id: response.id,
-          modelId: response.modelId,
-          modelName: response.modelName,
+        optimistic: true,
+        responses: models.map((model) => ({
+          id: `${optimisticId}-${model.id}`,
+          modelId: model.id,
+          modelName: model.name,
           status: "STREAMING" as const,
           text: "",
           metrics: null,
@@ -279,9 +304,61 @@ export const ArenaScreen = ({
       },
     ]);
 
-    // Same reason as above: a follow-up bumps the thread's `updatedAt`, and the
-    // sidebar's recency grouping needs that reread to reflect it.
-    router.refresh();
+    const result = await startTurn({ threadId: liveThreadId, prompt, models });
+
+    setPending(false);
+
+    if (!result.ok) {
+      // Take the optimistic turn back off screen. Leaving it there would claim
+      // a prompt was asked when the database never accepted it.
+      setTurns((current) => current.filter((turn) => turn.id !== optimisticId));
+      setSendError(result.error);
+      return;
+    }
+
+    // Replaced wholesale rather than patched, so the real ids arrive together
+    // and `optimistic` clears in the same commit. That is what releases the
+    // streaming effect above to open the streams.
+    setTurns((current) =>
+      current.map((turn) =>
+        turn.id !== optimisticId
+          ? turn
+          : {
+              id: result.turnId,
+              prompt,
+              responses: result.responses.map((response) => ({
+                id: response.id,
+                modelId: response.modelId,
+                modelName: response.modelName,
+                status: "STREAMING" as const,
+                text: "",
+                metrics: null,
+                won: false,
+              })),
+            },
+      ),
+    );
+
+    // Every send, not only the one that creates a thread: a follow-up bumps the
+    // thread's `updatedAt`, so the sidebar's recency grouping owes it a move to
+    // today just as much as a new thread owes it a row.
+    noteThreadTouched({
+      id: result.threadId,
+      title: result.threadTitle,
+      modelCount: models.length,
+    });
+
+    if (liveThreadId !== null) return;
+
+    // A brand-new thread now exists and this screen is already showing it, so
+    // the only thing left is for the address bar to agree. `replaceState`
+    // rather than a `push`: there is no second screen to go to, and a real
+    // navigation would tear down this component and the streams it is about to
+    // open — which is precisely the bug the hardening note in `docs/scope.md`
+    // records. Next's own router state is passed straight back through, since
+    // overwriting it with `null` would break the back button.
+    window.history.replaceState(window.history.state, "", `/t/${result.threadId}`);
+    setLiveThreadId(result.threadId);
   };
 
   const handleVote = async (turnId: string, modelResponseId: string) => {
@@ -384,7 +461,6 @@ export const ArenaScreen = ({
         <Composer
           catalog={catalog}
           defaultSelection={defaultSelection}
-          locked={lockedModels}
           disabled={pending}
           onSend={handleSend}
         />

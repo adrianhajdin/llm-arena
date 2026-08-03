@@ -222,6 +222,8 @@ The dark ladder, which is the design's home: page `oklch(0.19 0.014 55)`, card `
 
 **Motion is close to nothing on purpose.** Streaming text just appears, with a caret, no shimmer chrome over the top of the actual product moment. Skeletons appear only where there is a genuine wait with a known shape, the leaderboard table on first load. Transitions cap at 150ms and `prefers-reduced-motion` removes them entirely.
 
+_Amended during hardening, and recorded rather than quietly edited:_ "the instrument strip settle is the only animation in the app" now has exactly one exception, the skeleton breathe, and the "known shape" clause turned out to be the load-bearing half of this rule rather than the throwaway half. Both are argued in [the skeleton entry under Hardening](#loading-states-that-hold-the-screens-shape).
+
 **The accessibility floor, which is a gate and not an aspiration:** body text at 4.5:1 and borders and large text at 3:1, in both modes; a 2px rust focus ring with a 2px offset visible on every interactive element in both modes, and `outline: none` never appears without a replacement ring in the same rule; full keyboard operation of the toggle, the picker, and the vote buttons; color never the sole carrier of meaning, per the rust-versus-red hazard above.
 
 **What "build it" means here is the token layer plus one throwaway page that proves it.** No feature screens, those belong to features 5 through 9. The proof page replaces the `create-next-app` contents of `app/page.tsx` and shows, on one screen, the surface ladder, the type scale, buttons in every state including focus, a fake response card with mono metrics, a fake leaderboard row with the win-rate bar, a winner badge, and an error state, in both themes. It exists because "check by eye that a button never blends into the page" is not something reading CSS can answer. Feature 6 and 9 delete it when the real screens land.
@@ -375,9 +377,13 @@ Denials never leak an Arcjet reason: 429 with a real retry-after for the bucket,
 
 **Sending a prompt is two steps, in this order: create the durable record, then stream.** A server action opens one transaction that resolves/creates the `User`, creates (or reuses) the `Thread`, creates the `Turn` (the prompt), and creates one `ModelResponse` row per selected model at `STREAMING`. It returns the thread id and each response's id. Only once that comes back does the browser navigate to `/t/[threadId]` and open the model streams. _Asked, because it forks:_ streaming immediately and relocating the URL underneath the in-flight requests would shave the wait for a first token, but risks a stream dying on a client-side route swap for a saving that isn't worth that fragility yet. From a saved thread, sending a follow-up skips the navigation, everything else is identical.
 
+_Reversed during hardening, and the reversal is the interesting part._ "Create the durable record, then stream" still stands and always did. What was dropped is the navigation in the middle: the first prompt no longer goes to `/t/[threadId]` at all, it renders in place and relocates the URL, which is precisely the option this fork rejected. The rejection's stated reason was that relocating the URL under in-flight requests "risks a stream dying on a client-side route swap" — and that turned out to name the real hazard while pinning it on the wrong mechanism. The route swap _was_ the thing that killed streams, twice. Full argument in [the entry below](#the-first-prompt-stops-navigating-at-all).
+
 **Each selected model gets its own `fetch` to `POST /api/chat`, in parallel, and the client parses the stream itself with `ai`'s `readUIMessageStream` rather than `@ai-sdk/react`'s `useChat`.** Three independent per-model conversations, each with its own measured metrics riding in message metadata, don't fit `useChat`'s single-conversation model any better than what's already hand-rolled in `model-response-metrics.ts`, and pulling in a second AI SDK entry point for one hook isn't worth it.
 
 **A thread's models are locked at turn one.** Once a thread exists, the model picker in its composer goes away (or read-only); a follow-up always addresses the same models the thread started with. _Asked, because it forks:_ letting the set change per turn is more flexible but leaves a thread with responses scattered unevenly across models and turns, and "a follow-up continues each model's own separate conversation" reads most literally as one fixed cast for the thread's life.
+
+~~**Locked at turn one.**~~ _Reversed during hardening, by decision._ Models are changeable on any turn. The lock's own consequence is what argued against it: the picker vanishing from the composer read as a broken control rather than an enforced rule, and it was only ever noticed once the first prompt stopped navigating and the disappearance happened in place. The "responses scattered unevenly" worry above is real and was accepted with eyes open — see [the entry below](#models-are-changeable-on-any-turn).
 
 **Persistence happens server-side, inside the route, not from the client after the stream ends.** `stream-model-response.ts` already builds the exact `ModelResponseMetrics` object at finish; that same object is written into the `ModelResponse` row at that moment (upsert on the existing `@@unique([turnId, modelId])`, which is also what makes an in-place retry of a failed model overwrite its row instead of adding a second one). `FAILED` is written from the same `onError` path that already returns the user-facing sentence. An answer survives a closed tab this way; a client-reported "I finished" would not.
 
@@ -598,6 +604,281 @@ Typecheck, lint, `format:check` and a real production build all pass. Against a 
 - [x] Typecheck, lint, `format:check` and a real production build all pass
 - [x] Verified against a running dev server and the real database: ranked real rows, correct percentages and averages, no cost column, sign-in notice when signed out
 - [ ] **Needs a person:** eye-check the win-rate bar and first-place highlight in a real browser, both themes, and confirm the toggle is keyboard-operable
+
+## Hardening
+
+Not a planned feature — work that came back from production and had to be answered.
+
+### Error boundaries, and a shell that degrades instead of dying
+
+_Triggered by a real incident._ On 2 August 2026, right after the feature 9 deploy (`c1653e2`), six unhandled `$exception` events fired from the arena root in a ~98-second window (18:34:30–18:36:08Z), across 2 sessions and 3 ids, then never recurred. The message was React's production-redacted RSC placeholder, so the actual throw isn't recoverable from PostHog — only a digest. The hypothesis is a transient cold-start failure in one of the three server-side awaits in `app/(shell)/layout.tsx` (`auth()`, `findAppUserId`, `listThreadHistory`); confirming which needs the Vercel runtime logs for that window matched against the digest, which is a person's job, not something the code can settle.
+
+What the code _could_ settle was the real defect the incident exposed: there was no `error.tsx` or `global-error.tsx` anywhere under `app/`, so any throw from a Server Component showed Next's default framework error screen — a raw exception with no plain sentence and no retry, which is exactly what the rules forbid. And `(shell)/layout.tsx` wraps every real screen, so the blast radius was the whole app.
+
+#### Decided
+
+**Three layers, because one boundary can't cover its own layout.** An `error.tsx` boundary never catches a throw from the `layout.tsx` of its own segment — only a boundary _above_ it does. Since the suspected culprit is the shell layout itself, catching it needs both a boundary above (the root `global-error.tsx`) and the layout guarding its own reads. So: `(shell)/error.tsx` catches throws from the shell's screens; the layout degrades rather than throws; `global-error.tsx` is the last-resort backstop for anything either misses.
+
+**The layout degrades the same way `fetch-model-catalog.ts` already does.** Its three awaits are wrapped in one `try/catch`: the real reason goes to the server log with `console.error`, and an empty thread list stands in for the history so the frame stays usable. An empty sidebar and a working shell beat a dead page. The catch calls `unstable_rethrow(error)` first, so Next's own control-flow signals — a `redirect()`/`notFound()` from Clerk, and the dynamic-rendering bail-out that marks the route dynamic at build time — pass through untouched and only a genuine failure is swallowed. (Observed both ways: without the rethrow, the build-time dynamic signal got caught and logged; with it, the signal propagates and every shell route is correctly marked `ƒ` dynamic.)
+
+**`global-error.tsx` carries its own styles.** It replaces the entire document — providers, theme context, fonts, `globals.css`, all gone — so it can't lean on any of them. It ships its own `<html>`/`<body>` and an inline `<style>` block with a `prefers-color-scheme` palette, so it reads honestly on a light or dark system with nothing else loaded. Both boundaries reuse the app's existing failure language: the design page's destructive-tinted card, a plain sentence, and a "Try again" / "Reload" action wired to `reset()`.
+
+#### What got built
+
+- `app/(shell)/error.tsx`, the shell-screen boundary. A client component (boundaries must be), logs the error and digest from the client since that's the only place the real reason survives, renders the failure card with a retry.
+- `app/global-error.tsx`, the backstop. Self-contained document with its own inline theme-aware styles and a reload action.
+- `app/(shell)/layout.tsx`, thread-history reads pulled into a `loadThreadHistory` helper that catches, `unstable_rethrow`s control-flow signals, logs the real reason, and returns `[]` on a genuine failure.
+
+#### Verified
+
+Typecheck, lint, `format:check` and a real production build all pass. Against `next start` with a throwing test route wired temporarily into `(shell)`: the RSC payload shows the `error` boundary installed on the shell segment (it was `$undefined` before), the errorScripts chunk it points at is `error.tsx` itself (contains "This screen didn't load"), the `AppShell` frame still server-renders around the errored content, and no exception text or stack leaks into the HTML — only a numeric digest. React streams an error-boundary fallback to the client rather than SSR-ing its text, so the literal sentence renders on hydration, not in the raw HTML; the boundary and its chunk being wired to the right segment is what curl can confirm. `global-error.tsx`'s text is bundled too. The test route was removed after.
+
+- [x] Decide the approach
+- [x] `(shell)/error.tsx`: plain sentence + retry, logs the real reason and digest
+- [x] `global-error.tsx`: self-contained, theme-aware backstop with a reload action
+- [x] `(shell)/layout.tsx`: degrade on a genuine read failure, `unstable_rethrow` control-flow signals, empty thread list stands in
+- [x] Typecheck, lint, `format:check` and a real production build all pass
+- [x] Verified boundary wiring, frame survival, and no leaked exception against `next start` with a throwing route
+- [ ] **Needs a person:** pull the Vercel runtime logs for 18:34–18:36Z on 2 August 2026 and match the React digest, to name what actually threw
+- [ ] **Needs a person:** eye-check both boundary screens in a real browser, in light and dark, and confirm the retry/reload button is keyboard-operable
+
+### A new thread's first answer never appeared until a reload
+
+_Triggered by real use, reported by hand._ On a brand-new thread, the first prompt produced nothing on screen — the models streamed, the answers persisted, but the arena sat at "Thinking…" (or at the empty hero) until the page was reloaded, at which point the full answer was there. Every follow-up in that same thread then streamed live and instantly. The Next dev indicator showed rendering activity throughout the dead window.
+
+Two separate defects, stacked, both in the new-thread hand-off recorded in feature 6 — "create the durable record, then stream", with a navigation in between. That decision is still right and stands; what was wrong was how the navigation was carried out.
+
+#### Decided
+
+**The racing `router.refresh()` is the bug, and it moves into the server action.** `handleSend` fired `router.push('/t/[threadId]')` and `router.refresh()` back to back, unawaited. `push` starts one RSC request for the destination; `refresh` starts a second for whatever the router still considers the current URL, and there is no ordering guarantee between them. Whichever landed second replaced the page segment's cache node — discarding the `ArenaScreen` that had just mounted on `/t/[threadId]`, fired its effect, and opened the three `POST /api/chat` streams. The requests kept running and `markModelResponseComplete` still wrote every row, which is exactly why a reload showed a finished answer: the stream was never the problem, the tree holding its output was thrown away. The symptom was invisible on follow-ups because a follow-up never navigates.
+
+The fix is that nothing in the arena calls `router.refresh()` any more. `startTurn` calls `revalidatePath("/", "layout")` itself, so the invalidation travels back with the action's own response and is already in hand before the browser navigates — one navigation, nothing to race. `"layout"` because the only stale thing is the shell layout's sidebar, which every screen shares. _The cost, accepted deliberately:_ path revalidation also drops the hour-long fetch cache in `fetch-model-catalog.ts` for those paths, so the next render pays one extra OpenRouter round trip. That is once per prompt sent, not once per render, and per-render is the cost that cache was added to avoid.
+
+This also strictly improves the follow-up path, which previously fired `refresh()` _after_ appending the new turn — i.e. re-rendering the whole tree while three streams were open. It happened to be survivable there (same route, same position, so React reconciled rather than remounted) but it was the same hazard waiting on a worse day. Now the fresh tree lands before the turn is appended.
+
+**A `loading.tsx` for the whole `(shell)` group, because the second defect was that nothing rendered at all during the navigation.** There was no `loading.tsx` and no `Suspense` boundary anywhere under `app/`, and every route in the group is dynamic — Clerk's `auth()`, the thread and leaderboard queries, the catalog, plus the Arcjet decision round trip that `proxy.ts` runs in front of `/t/`. So `push` blocked completely on a real server render with the previous screen held frozen, which is what made "nothing happened" the honest reading of the UI. This is the part that produced the visible rendering indicator with no visible change.
+
+It shipped as one file for four screens carrying a single "Loading…" sentence, which fixed the frozen-screen defect and was immediately the wrong answer visually. Superseded within the day by [the skeleton entry below](#loading-states-that-hold-the-screens-shape), which is where the real reasoning about shape now lives. What survives from this step, and is still the load-bearing part, is that the boundary sits beside the shell layout rather than inside a screen, so the sidebar and top bar stay rendered and interactive and only the content area is ever in a loading state.
+
+#### What got built
+
+- `features/arena/start-turn.ts`, `revalidatePath("/", "layout")` on success, with the race and the cache trade-off recorded in place.
+- `features/arena/arena-screen.tsx`, both `router.refresh()` calls removed; the new-thread branch is a bare `push`. The module comment now records why a turn in flight must never have its tree swapped.
+- `app/(shell)/loading.tsx`, the group-wide boundary — reshaped per route by the next entry.
+
+#### Verified
+
+Typecheck, lint, `format:check` and a real production build all pass. Against the running server, the RSC payload for a shell route now carries a populated `loading` slot pointing at `(shell)/loading.tsx` — it was absent before — and that slot is a sibling of the layout's `children` slot, which is what confirms the frame survives and only the content area swaps. The `Loading…` text and `aria-live="polite"` are both really in the payload rather than only in a client chunk.
+
+- [x] Diagnose the actual mechanism, without changing code first
+- [x] `startTurn` revalidates the shell layout; both `router.refresh()` calls removed
+- [x] `(shell)/loading.tsx`, frame-preserving _(route-agnostic at first, reshaped by the next entry)_
+- [x] Typecheck, lint, `format:check` and a real production build all pass
+- [x] Verified the loading boundary is wired to the shell segment and preserves the frame, against a running server
+- [ ] **Needs a person:** send a first prompt on a brand-new thread in a real browser and confirm the answer streams live, with no reload. In DevTools → Network, confirm there is now exactly **one** `?_rsc=` request after send, and exactly **one** trio of `POST /api/chat` calls, not two.
+- [ ] **Needs a person:** confirm a follow-up in that same thread still streams live, and that the sidebar shows the new thread and its recency grouping without a hard reload.
+- [ ] **Needs a person:** eye-check the loading sentence in both themes, and confirm the sidebar stays operable while a screen loads.
+- [ ] **Not installed:** `frontend-design` did not fire for `loading.tsx`; revisit if that screen ever grows past a sentence.
+
+### Loading states that hold the screen's shape
+
+_Follow-up to the entry above, asked for directly:_ the single "Loading…" sentence fixed the frozen screen but looked cheap, and a skeleton was asked for instead.
+
+#### Decided
+
+**Feature 4 had already decided this, and re-reading it is what settled the design rather than taste.** Its motion rule permits a skeleton "only where there is a genuine wait with a known shape, the leaderboard table on first load". That clause disqualifies the sentence _and_ disqualifies one shared skeleton: four screens with four different layouts have four different known shapes, and a single fallback would be shaped wrongly for at least three of them. So each route carries its own, mirroring the real geometry of the screen it stands in for — same container width, same column widths, same bordered surface, same composer height — so nothing jumps when the real screen replaces it.
+
+**Static text renders for real; only what needs data gets blocked out.** The page's name and the table's column headers do not depend on any query, so `Leaderboard`, `Models` and the `.text-eyebrow` headers are the real strings. The moment a skeleton appears you already know which screen you are on and what the columns will hold, and only the numbers are missing. Blocking out a heading that is one known word is precisely what makes a loading state read as generic.
+
+The lead paragraphs are the deliberate exception and stay skeletoned rather than duplicated. They are real copy owned by the screen components, and a second hand-maintained copy inside a `loading.tsx` would drift the first time someone edited one and not the other.
+
+**The breathe is an amendment to feature 4's motion rule, and it was asked rather than assumed.** Feature 4 says the instrument strip's settle is the only animation in the app; this adds a second, a slow opacity breathe on skeleton blocks only. The argument for it: a dim block that never moves does not read as content arriving, it reads as content that failed, which is the opposite of what a loading state owes someone waiting. It is opacity-only and 1.6s so it cannot compete with the strip's 150ms settle — the strip is still where all the motion boldness is spent — and the existing `prefers-reduced-motion` reset already stops it dead. Feature 4's own text has been amended in place rather than left to contradict the code.
+
+**One `.skeleton` class in `globals.css`, owning colour and breathe but not shape.** It appears across five files, which is the "same handful of classes in three places is a component" rule by a wide margin. It sets `bg-muted` and the animation; width, height and radius stay per-instance, because those belong to whatever the block is standing in for. Pointedly not `.measure-bar`, which already means "a number drawn to scale" — a thing you can read, where a skeleton is the absence of a thing.
+
+**The skeleton markup lives in the feature, not in `app/`.** `arena-skeleton.tsx` sits beside `arena-screen.tsx` so the two change in the same commit when the layout moves, which is the folder-by-feature rule doing real work. The `loading.tsx` files are one-line re-exports. The arena's composer shell is shared between the root and the thread route from that one module rather than copied into two route files.
+
+**The whole visual scaffold is `aria-hidden` behind one `sr-only` sentence.** A skeleton is decoration that announces a wait; read aloud, a table of empty cells is worse than no table. The sentence is the honest version of the same information, which is also why the scaffold uses grids rather than `<table>` — no fake table semantics to hide.
+
+_Note on process:_ `frontend-design` never fired because it is installed against a different project (`DevTrack`), not this one. Per `CLAUDE.md` it was read and followed directly from disk instead of assumed active. Its "spend your boldness in one place" is the reason the breathe is the only liberty taken here and the palette, radius and border treatment are entirely feature 4's.
+
+#### What got built
+
+- `app/globals.css`, the `.skeleton` component class and its `skeleton-breathe` keyframes.
+- `features/arena/arena-skeleton.tsx`, `ArenaSkeleton` and `ThreadSkeleton` over a shared composer shell.
+- `features/leaderboard/leaderboard-skeleton.tsx` and `features/models/models-skeleton.tsx`, each mirroring its own table's real column widths.
+- Four `loading.tsx` files: `(shell)/`, `(shell)/t/[threadId]/`, `(shell)/leaderboard/`, `(shell)/models/`.
+
+#### Verified
+
+Typecheck, lint, `format:check` and a real production build all pass.
+
+**The served CSS was inspected rather than the source, which is the only check that can catch this class of mistake:** Tailwind emits _nothing at all_ for a utility it does not recognise, so an arbitrary-value class that never compiled would have failed silently and looked like a layout bug. In the production bundle, `.skeleton` resolves to `background-color:var(--muted)` with `animation:1.6s ease-in-out infinite skeleton-breathe`, the keyframes are emitted, both arbitrary grid templates resolved to the exact intended column widths (`3rem 1fr 14rem 9rem 8rem` and `1fr 6rem 12rem`), and `min-w-3xl` resolved to `--container-3xl: 48rem`, matching the real leaderboard table rather than silently collapsing. `--muted` resolves in both modes with hex fallbacks, `#efeae4` light and `#2b221c` dark.
+
+**The reduced-motion escape hatch was confirmed to actually win, not just to exist.** The `prefers-reduced-motion` block sets `animation-duration:.01ms!important` and `animation-iteration-count:1!important` on `*`, and it is emitted _after_ `.skeleton` in the bundle, so both cascade position and `!important` are on its side.
+
+- [x] Decide the approach, and re-read feature 4 before designing rather than after
+- [x] Ask the one real fork (static blocks versus a breathe) instead of assuming it
+- [x] `.skeleton` in `globals.css`, colour and motion only, shape per instance
+- [x] Per-route skeletons mirroring each screen's real geometry
+- [x] Feature 4's motion rule amended in place, not quietly contradicted
+- [x] Typecheck, lint, `format:check` and a real production build all pass
+- [x] Verified in the served CSS: every arbitrary utility compiled, tokens resolve in both modes, reduced-motion genuinely wins
+- [ ] **Needs a person:** navigate to each of the four screens and confirm nothing jumps when the real content replaces the skeleton — the column widths are copied by hand from the real tables and only the eye can confirm they still match.
+- [ ] **Needs a person:** eye-check the block contrast in both themes. `bg-muted` on `bg-card` is one lightness step by design, which is quiet on purpose; confirm it reads as content-arriving and not as an empty box.
+- [ ] **Needs a person:** confirm the breathe stops with OS "reduce motion" on, and that it does not fight the instrument strip's settle when a real answer lands.
+
+### The first prompt stops navigating at all
+
+_Triggered by real use, again._ After the redirect was fixed and the skeleton landed, the remaining complaint was latency: a first prompt took 3–4 seconds locally and 7–10 in production before the new thread appeared. The proposal that settled it came from outside the code — "redirect instantly, show the skeleton, fetch after" — which is not literally possible, and pointed straight at the better answer anyway.
+
+**Why the literal version cannot work:** the redirect target is `/t/{threadId}`, and the `threadId` is produced by the very write the redirect is trying to get ahead of. Generating an id client-side and navigating early only moves the failure: the thread page cannot distinguish "not written yet" from "does not exist" and would `notFound()` on the user's own new thread.
+
+#### Measured first
+
+Before deciding, the send path was counted rather than guessed. `pooled.db.prisma.io` answers in **~52ms per round trip** from a dev machine. A first prompt made **~9–10 sequential** round trips: the `user.upsert`, then `BEGIN`, `thread.create`, `turn.create`, three `modelResponse.create`s and `COMMIT` inside one interactive transaction. The three creates are wrapped in `Promise.all` and do **not** parallelise — they share one transaction connection and serialise — which is worth knowing before anyone "optimises" that line. On top of that the catalog is **530KB across 337 models, ~350ms** cold. So roughly 1–2s is accounted for; the rest is cold start and production region distance, which only Vercel's own function logs can settle.
+
+#### Decided
+
+**A regression of ours was on that path, and it went first.** `revalidatePath("/", "layout")` in `startTurn` — added one step earlier in this same hardening pass to fix the sidebar — turned out to be far more expensive than its own note claimed. That note said "the next render pays one more OpenRouter round trip". Wrong placement: a server action that revalidates re-renders the current route and ships that tree back _in the action's own response_, so every prompt waited on a full extra page render plus a cold 530KB catalog refetch that the revalidation had itself just purged, before the caller was even told the turn existed. Then the destination page fetched the catalog cold a second time, for the same reason. Removed outright.
+
+**The first prompt renders in place and relocates the URL with `history.replaceState`.** This is the reversal of feature 6's fork, and the evidence changed in a specific way worth writing down: that fork rejected relocating the URL because it "risks a stream dying on a client-side route swap". The instinct was right and the attribution was backwards. A route swap is exactly what killed the streams — first as the `push`/`refresh` race, then as pure latency, because a redirect cannot begin until the row exists and so every first prompt paid a second full page render before a single token could arrive. `replaceState` performs no route swap at all, which is what makes it the safe option rather than the fragile one. What the fork was protecting against is the thing it chose.
+
+The gains are structural rather than tuned: no destination render, no second cold catalog fetch, no Arcjet proxy hop on the send path, and the streams open roughly a second sooner because they no longer wait on a page render. `/t/[threadId]` is untouched and still serves shared links, reloads and sidebar navigation.
+
+**The turn goes on screen before the round trip, not after.** Removing the navigation alone would still have left the composer looking inert for the length of the write plus any cold start, so a turn is appended immediately with placeholder ids and `optimistic: true`, showing the prompt in its bubble and every column reading "Thinking…", which is honestly what is happening. The streaming effect skips optimistic turns by that flag, because a stream opened against a placeholder `turnId` would be refused by `/api/chat` and would turn a healthy turn into a failed one. When the real ids arrive the turn is replaced wholesale rather than patched, so the ids and the cleared flag land in one commit. A refusal removes it again rather than leaving a prompt on screen the database never accepted.
+
+**`threadId` and `lockedModels` become client state seeded from props.** A brand-new thread starts as `null`/`null` and acquires both mid-session with no navigation to carry them, so from the first send onward the client is the authority on which thread is open. This is also what locks the composer's model picker at turn one without a server round trip.
+
+**The sidebar is now one navigation behind, deliberately.** With no navigation and no revalidation, a thread created this way does not appear in the sidebar's server-rendered list until the next real navigation or reload. Both ways of forcing that reread — `router.refresh()` or a `revalidatePath` — re-render the current route and reapply its tree, which is the exact move that cost us the streams twice already, and after `replaceState` it carries a worse risk: the router may still consider the current route `/`, so reapplying its tree would wipe the on-screen conversation. A sidebar one navigation behind is a much smaller price, and it corrects itself the moment you go anywhere. _This also silently reverts the follow-up `router.refresh()` that fed the sidebar's recency grouping;_ same trade, now consistent across both paths.
+
+#### What got built
+
+- `features/arena/turn-state.ts`, the `optimistic` flag and why nothing may stream against such a turn.
+- `features/arena/arena-screen.tsx`, one send path for both cases; `liveThreadId`/`liveLockedModels` state; `replaceState` passing Next's own history state straight back through so the back button survives; no `router.push` or `router.refresh` anywhere in the file.
+- `features/arena/start-turn.ts`, `revalidatePath` removed, with the reason recorded in place so nobody re-adds it.
+
+#### Verified
+
+Typecheck, lint, `format:check` and a real production build all pass. `/`, `/leaderboard` and `/models` all answer 200 against a running server. Confirmed by grep that no `router.push`, `router.refresh` or `revalidatePath` call survives anywhere in `features/arena/` outside comments and the one noted below.
+
+- [x] Measure the send path before designing anything
+- [x] Remove the `revalidatePath` regression from the action
+- [x] First prompt renders in place; `replaceState` relocates the URL
+- [x] Optimistic turn with placeholder ids, skipped by the streaming effect, replaced wholesale
+- [x] `threadId` and `lockedModels` become client state
+- [x] Feature 6's fork amended in place with the changed evidence
+- [x] Typecheck, lint, `format:check` and a real production build all pass
+- [ ] **Needs a person, and this is the whole point:** send a first prompt on a brand-new thread. The prompt and three "Thinking…" columns should appear instantly, the URL should become `/t/{id}` with no page transition, and tokens should arrive noticeably sooner than before. Time it against the old 7–10s.
+- [ ] **Needs a person:** confirm `replaceState` interop — reload the page mid-stream and after, and check the back button goes where you came from rather than to a blank `/`. This is the main technical risk in the change.
+- [ ] **Needs a person:** confirm exactly one trio of `POST /api/chat` per turn in DevTools, and no request carrying an `optimistic-…` turn id.
+- [ ] **Needs a person:** confirm the sidebar picks up the new thread on the next navigation, and decide whether one-navigation-behind is acceptable or worth solving properly (a client-side sidebar update is the safe way, and it is cross-feature plumbing a route would have to compose).
+- [ ] **Known sharp edge:** `composer.tsx`'s catalog-failure "Try again" button still calls `router.refresh()`. It is user-initiated and only renders when the catalog is unavailable, so nothing is normally in flight, but after `replaceState` it is the one remaining path that could reapply the wrong tree. Left alone rather than changed unasked.
+- [ ] **Unrelated, found while measuring:** `listThreadHistory` selects every thread → every turn → every response to compute a distinct model count, and Prisma runs nested selects as separate queries. It grows with every prompt ever sent. Not on the send path any more, but it is on every shell render.
+- [ ] **Unrelated, found while measuring:** `ARCJET_MODE` is set in `.env.local` but is absent from the env schema and read nowhere; the rules are hardcoded `mode: "LIVE"`.
+
+### Models are changeable on any turn
+
+_Reported as a bug, and it was a real one underneath._ "In the prompt input box, the add model button is gone." It was gone on purpose — models were locked at turn one, so the picker was replaced by plain chips once a thread existed. What made it read as breakage rather than a rule is the previous entry: the first prompt no longer navigates, so the picker now vanishes _in place_, under the cursor, with no page change to explain it. A rule you only discover by watching a control disappear is not a rule anybody was told.
+
+Given the choice between signposting the lock and removing it, the lock went.
+
+#### Decided
+
+**The database always allowed this, which is what made it cheap.** `ModelResponse` rows hang off a `turnId` with their own `modelId`, unique on `[turnId, modelId]`. A thread whose first turn ran three models and whose fourth runs a different three was always representable — no migration, no schema change. The lock was application policy in two places (`startTurn` reading models back out of prior turns, and the composer hiding its picker) and nothing more.
+
+**`startTurn` stops deriving models from prior turns and trusts the caller's ids.** This deletes a `modelResponse.findMany` from every follow-up, so the change makes sending marginally faster rather than slower.
+
+**The `MIN`/`MAX` check now runs on every turn.** It used to be gated on `threadId === null`, which was correct while a follow-up's models came from the database and wrong the moment they come from the caller — an unchecked follow-up could ask for none or for fifty.
+
+**Submitted ids are resolved against the live free catalog, not merely validated.** The stored `modelName` is the catalog's own; `StartTurnModel.name` is now read nowhere on the server. The browser still sends it because it needs the name locally to render the turn, and the server discards it. Fails closed like `/api/chat`: a catalog we cannot read is not permission to record a turn against models we cannot vouch for.
+
+_This reverses advice given one message earlier in the same conversation, and the reversal is the honest part._ Validating here was first dismissed as putting latency back on the send path. That was reasoning from a world that had just been deleted: while `revalidatePath` was purging the catalog's fetch cache on every send, every read was cold and cost a 530KB round trip. With that gone the catalog is cached for an hour and read on every page render, so it is warm virtually always and this check costs approximately nothing.
+
+**Ids are deduplicated before they are counted.** Not tidiness: `@@unique([turnId, modelId])` means the same id twice fails the insert and surfaces as a raw database error, which this app never shows anyone. The UI cannot produce a duplicate; a hand-written request can.
+
+**A model that has left the free list is explained, not silently dropped.** The composer matches its selection against the live catalog, so an id that is gone simply produces no chip. Left alone that is a thread whose composer shows fewer models than it ran and a send button that refuses with no reason given — indistinguishable from a broken app. So the footer line says what happened and what to do, and there are two versions because the situations differ: some models lost, and every model lost.
+
+Counting those dead ids was also a trap worth recording. Floor and cap were computed from `selectedIds`, which still contained them, so a thread that opened with three models and lost two would sit at "3 of 3 selected" showing one chip, and refuse to let you add the replacement you needed. Every count now comes from what the catalog actually offers, and a toggle prunes the rest away.
+
+**The composer opens on the thread's _most recent_ turn's models**, so a follow-up repeats the same cast unless you change it. The first turn's set would be the wrong default the moment someone has already swapped something.
+
+**Accepted with eyes open:** feature 6's "responses scattered unevenly across models and turns" is now possible, and a model added at turn three genuinely has no answers for turns one and two. `buildModelMessages` already handled exactly this shape — it feeds a model the prompts plus only its _own_ completed answers — because it had to cope with a model that failed a turn. So a newly added model sees the conversation's questions but claims no answers it never gave, which is the honest reading.
+
+**No Arcjet or PostHog coverage changed.** Asked directly and checked rather than assumed: `shield`, the `/api/chat` bot rule and token bucket, and the `/t/` sliding window are all untouched, and the bucket still spends one token per model call regardless of which models. Every funnel event still fires, and `prompt_sent` gets _better_ data — it already carried `modelIds` and `modelCount`, which now records a real per-turn cast instead of a value that was constant for a thread's life.
+
+#### What got built
+
+- `features/arena/start-turn.ts`, caller-chosen models on every turn, dedupe, always-on count check, catalog resolution, and the `findMany` deleted.
+- `features/arena/composer.tsx`, the `locked` prop and its branch gone, picker always present, counts taken from available models only, and the unavailable-model explanation.
+- `features/arena/arena-screen.tsx`, `lockedModels` prop and `liveLockedModels` state both removed — the composer owns selection now, so there is nothing to hand back and forth.
+- `app/(shell)/t/[threadId]/page.tsx`, opens the composer on the latest turn's models.
+
+#### Verified
+
+Typecheck, lint, `format:check` and a real production build all pass. Confirmed by grep that the only surviving `locked` identifier is `model-picker.tsx`'s local floor/cap flag, which is a different idea, and that the Arcjet and PostHog call sites are all still in place.
+
+- [x] Decide the approach, and surface the contradiction with feature 6 rather than working around it
+- [x] Unlock models per turn; delete the derived-from-prior-turns lookup
+- [x] `MIN`/`MAX` on every turn; dedupe ids; resolve names from the catalog
+- [x] Explain an unavailable model instead of dropping it silently
+- [x] Fix the floor/cap trap that counted models the catalog no longer has
+- [x] Feature 6's lock amended in place, with the accepted cost written down
+- [x] Confirm no Arcjet or PostHog coverage was lost
+- [x] Typecheck, lint, `format:check` and a real production build all pass
+- [ ] **Needs a person:** on an existing thread, swap a model and send. The new model should answer, and the old turns should still render with their own model sets.
+- [ ] **Needs a person:** confirm the new model's answer reads sensibly given it has no prior answers of its own — this is the accepted cost above, and it is worth seeing once on a real thread before trusting it.
+- [ ] **Needs a person, hard to stage:** the unavailable-model path only triggers when a model actually leaves OpenRouter's free list, so it cannot be exercised on demand. The message wording is unverified against a real occurrence.
+- [ ] **Still open from the previous entry:** `replaceState` interop — the breadcrumb, standings strip and `thread_link_copied` property read `usePathname()`, which Next documents as syncing with `replaceState` but which remains unconfirmed here.
+
+### The sidebar catches up without a server round trip
+
+_The accepted cost from two entries up, un-accepted._ Removing the navigation left the sidebar's thread list one navigation behind: a brand-new thread was open on screen and absent from the list beside it until a reload. That was recorded as a deliberate trade and it was the wrong call — sending one prompt and then clicking "New thread" means never seeing your first thread at all.
+
+#### Decided
+
+**The browser reports what it did; the server list stays the truth.** Both ways of forcing a reread — `router.refresh()` or a `revalidatePath` — re-render the current route and reapply its tree, and that is the single mechanism that has broken the arena twice in this hardening pass. So nothing is refreshed. A small client store holds "threads this browser has sent to", and the sidebar folds that into whatever the last server render gave it.
+
+_A correction to the analysis that chose this._ The case against `router.refresh()` was first put as "it would wipe the on-screen conversation", which overstates it: `refresh()` preserves client component state rather than remounting, which is exactly why the old follow-up refresh never killed a stream. The real objection is narrower and still decisive. After `replaceState` it is unverified whether the router considers the URL `/t/{id}` or still `/`; if the latter, it refetches `/`, and whether React then preserves `ArenaScreen` or remounts it depends on page-segment keys. Remounting resets `turns` and the conversation vanishes from screen while sitting safely in the database — which is precisely the first bug reported in this pass. Most likely `refresh()` is fine. "Most likely" is not the standard for the one area with a two-for-two failure record, and it cannot be settled here because this project has no browser automation by decision.
+
+**Two jobs, because the second was nearly missed.** The obvious job is adding a thread the list does not have. The sibling symptom, found while weighing the options rather than after shipping, is recency: a follow-up bumps `updatedAt`, so a month-old thread should jump from "Earlier" to "Today", and a fix that only handled new threads would have left that broken. `router.refresh()` would have got it for free. So the arena reports **every** send, not only the one that creates a thread, and the merge both adds and promotes.
+
+**Server data wins wherever it exists, which is what makes this self-cleaning.** The store's `modelCount` counts only the turn just sent, where the server counts every model across the whole thread. So the merge prefers the server's row whenever it has one, and uses the caller's values only for a thread the server has never mentioned — exactly the case where they are complete and correct. The consequence worth stating: the moment any navigation brings the real list back, the fold-in becomes a no-op instead of a second copy. Nothing has to remember to clear it.
+
+**The store lives in `infrastructure/`, and that is the rule rather than a preference.** `features/arena` writes to it and `features/shell` reads it, and a feature may not import another feature. `docs/coding-standards.md` names this case exactly: "if two features need the same thing, it belongs in `infrastructure/`". No route plumbing, no callback threaded through props.
+
+**`thread-history.ts` split in two, the same way `model-catalog.ts` is.** It was `server-only` because it queries Postgres, but the sidebar is a client component and needs the same recency labels the query sorts into. Duplicating `"Today"` into client code would be a string that could drift from the grouping that produced it, so the shapes, the labels and the merge moved to `thread-groups.ts` with no `server-only` mark, and the query kept the rest. This also fixed something latent: `app-shell.tsx` had been importing `ThreadGroup` as a type _from the `server-only` module_, which worked only because types are erased.
+
+**`startTurn` returns the title it stored.** The rule is "first 80 characters of the first prompt", and the browser now needs the title to draw the row. Returning it keeps that rule in one place instead of reimplementing `prompt.slice(0, 80)` client-side where it could quietly diverge.
+
+**A missing provider degrades to a no-op rather than throwing.** The context defaults to an empty store with a do-nothing writer. Crashing the arena because a sidebar convenience was not wired is not a trade worth making.
+
+#### What got built
+
+- `infrastructure/thread-history-store.tsx`, the client store: most-recent-first, one entry per thread, no-op default.
+- `features/shell/thread-groups.ts`, the pure half — shapes, labels, `groupLabel`, and `mergeTouchedThreads`.
+- `features/shell/thread-history.ts`, now just the query.
+- `features/shell/sidebar.tsx`, renders the merged list; `features/shell/app-shell.tsx`, type import repointed at the pure module.
+- `app/(shell)/layout.tsx`, wraps the whole shell so the writer inside `children` and the reader in the sidebar share one store.
+- `features/arena/arena-screen.tsx` reports every send; `features/arena/start-turn.ts` returns `threadTitle`.
+
+#### Verified
+
+Typecheck, lint, `format:check` and a real production build all pass.
+
+**The merge is pure, so it was actually exercised rather than reasoned about** — seven cases, all passing: an untouched list is returned identically and no empty "Today" is invented; a brand-new thread appears under Today; a thread the server already lists produces no duplicate and keeps the server's title and count over the client's; a touched thread moves out of "Earlier" into "Today"; its old group survives if other threads remain and is dropped if not; touched threads order most-recent-first ahead of the server's own Today rows; and Today always leads while later groups keep server order. Run as a one-off script against the real module in the session scratchpad — no test runner was added, per `CLAUDE.md`.
+
+- [x] Decide the approach, and correct the overstated case against `router.refresh()`
+- [x] Catch the recency-regrouping sibling symptom before shipping rather than after
+- [x] Client store in `infrastructure/`, per the two-features rule
+- [x] Split `thread-history.ts` into pure and `server-only` halves
+- [x] `startTurn` returns the stored title so the 80-character rule has one home
+- [x] Verified the merge against seven real cases, including self-cleaning
+- [x] Typecheck, lint, `format:check` and a real production build all pass
+- [ ] **Needs a person:** send a first prompt on a new thread and confirm the row appears in the sidebar immediately, with the prompt as its title and no reload.
+- [ ] **Needs a person:** send a follow-up to an older thread and confirm it moves up to "Today".
+- [ ] **Needs a person:** then navigate to `/leaderboard` and back, and confirm the row is still there exactly once — this is the self-cleaning path, and a duplicate here is the one failure mode the unit checks cannot see.
+- [ ] **Still open, and it will be visible here:** the new sidebar row's active highlight uses `usePathname()`, which is the unverified `replaceState` sync question from two entries up. The row may appear correctly but not be highlighted until a real navigation.
 
 ## Not doing right now
 

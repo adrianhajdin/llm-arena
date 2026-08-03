@@ -4,7 +4,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { CloseIcon } from "./icons";
 import { Sidebar } from "./sidebar";
-import { type ThreadGroup } from "./thread-history";
+import { type ThreadGroup } from "./thread-groups";
 import { TopBar } from "./top-bar";
 
 /**

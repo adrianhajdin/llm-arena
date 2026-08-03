@@ -2,32 +2,25 @@ import "server-only";
 
 import { database } from "@/infrastructure/database";
 
+import {
+  GROUP_ORDER,
+  groupLabel,
+  type ThreadGroup,
+  type ThreadSummary,
+} from "./thread-groups";
+
 /**
  * The signed-in user's own threads, grouped by recency rather than numbered:
  * a thread from an hour ago and one from last month are different kinds of
  * thing, and a number would claim a sequence that does not exist.
+ *
+ * The shapes and the recency rules live in `thread-groups.ts`, which carries no
+ * `server-only` mark, because the sidebar is a client component and needs the
+ * same labels this query sorts into.
  */
-
-export type ThreadSummary = {
-  readonly id: string;
-  readonly title: string;
-  readonly modelCount: number;
-};
-
-export type ThreadGroup = {
-  readonly label: string;
-  readonly threads: readonly ThreadSummary[];
-};
 
 const startOfDay = (date: Date) =>
   new Date(date.getFullYear(), date.getMonth(), date.getDate());
-
-/** "Today", "This week" (the six days before that), then "Earlier". */
-const groupLabel = (updatedAt: Date, today: Date, weekAgo: Date): string => {
-  if (updatedAt >= today) return "Today";
-  if (updatedAt >= weekAgo) return "This week";
-  return "Earlier";
-};
 
 export const listThreadHistory = async (
   userId: string,
@@ -60,7 +53,8 @@ export const listThreadHistory = async (
     groups.set(label, group);
   }
 
-  return ["Today", "This week", "Earlier"]
-    .filter((label) => groups.has(label))
-    .map((label) => ({ label, threads: groups.get(label)! }));
+  return GROUP_ORDER.filter((label) => groups.has(label)).map((label) => ({
+    label,
+    threads: groups.get(label)!,
+  }));
 };
