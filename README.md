@@ -1,6 +1,6 @@
 <div align="center">
   <br />
-    <a href="" target="_blank">
+    <a href="https://youtu.be/xEBSV-M-qFk" target="_blank">
       <img src="public/readme/readme-hero.webp" alt="Project Banner">
     </a>
   <br />
@@ -37,7 +37,7 @@ This repository contains the code corresponding to an in-depth tutorial availabl
 
 If you prefer visual learning, this is the perfect resource for you. Follow our tutorial to learn how to build projects like these step-by-step in a beginner-friendly manner!
 
-<a href="" target="_blank"><img src="https://github.com/sujatagunale/EasyRead/assets/151519281/1736fca5-a031-4854-8c09-bc110e3bc16d" /></a>
+<a href="https://youtu.be/xEBSV-M-qFk" target="_blank"><img src="https://github.com/sujatagunale/EasyRead/assets/151519281/1736fca5-a031-4854-8c09-bc110e3bc16d" /></a>
 
 ## <a name="introduction">✨ Introduction</a>
 
@@ -50,11 +50,17 @@ If you're getting started and need assistance or face any bugs, join our active 
 ## <a name="tech-stack">⚙️ Tech Stack</a>
 
 - **[Next.js](https://nextjs.org/)** is a production-ready React framework that offers server-side rendering, static site generation, and powerful routing features. It streamlines the development of full-stack web applications by providing a comprehensive ecosystem for performance optimization and API development.
+
 - **[Prisma ORM](https://www.prisma.io/)** is a next-generation ORM for Node.js and TypeScript that simplifies database interactions. It provides a type-safe client generated from your schema, making querying intuitive and highly efficient.
+
 - **[PostgreSQL](https://www.postgresql.org/)** is an advanced, open-source object-relational database system recognized for its reliability and performance. It serves as the persistent storage layer for tracking votes, metrics, and the public leaderboard.
+
 - **[Clerk](https://jsm.dev/arena-clerk)** is a specialized authentication and user management platform for React and Next.js. It offers drop-in pre-built components for secure sign-in and profile management out of the box.
+
 - **[PostHog](https://jsm.dev/arena-posthog)** is an all-in-one product analytics platform. It provides comprehensive observability on every single model call, tracking essential usage data and user interactions across the arena.
+
 - **[Arcjet](https://jsm.dev/arena-arcjet)** is an advanced security layer built for modern applications. It locks down the API endpoints to protect against malicious bots and prompt injection attacks.
+
 - **[Greptile](https://jsm.dev/arena-greptile)** is an AI-powered code review tool. It seamlessly reviews every pull request opened by our agent live during the development workflow to ensure code quality.
 
 ## <a name="features">🔋 Features</a>
