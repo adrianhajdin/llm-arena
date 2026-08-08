@@ -3,6 +3,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono, Newsreader } from "next/font/google";
 
 import { PostHogProvider } from "@/features/analytics/posthog-provider";
+import { ChunkLoadRecovery } from "@/features/chunk-recovery/chunk-load-recovery";
 import { ThemeProvider } from "@/features/theme/theme-provider";
 import "./globals.css";
 
@@ -46,6 +47,9 @@ export default function RootLayout({
             <PostHogProvider>{children}</PostHogProvider>
           </ClerkProvider>
         </ThemeProvider>
+        {/* Outside the providers on purpose: if a provider's own chunk is what
+            failed to load, the recovery affordance must still render. */}
+        <ChunkLoadRecovery />
       </body>
     </html>
   );

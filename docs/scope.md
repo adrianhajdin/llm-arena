@@ -642,6 +642,39 @@ Typecheck, lint, `format:check` and a real production build all pass. Against `n
 - [ ] **Needs a person:** pull the Vercel runtime logs for 18:34–18:36Z on 2 August 2026 and match the React digest, to name what actually threw
 - [ ] **Needs a person:** eye-check both boundary screens in a real browser, in light and dark, and confirm the retry/reload button is keyboard-operable
 
+### A failed Clerk chunk vanished the auth widget with no message
+
+_Triggered by a real incident._ On 8 August 2026, a signed-in user hit an unhandled `ChunkLoadError` when Clerk's UI bundle (`@clerk/ui@1.28.0`) failed to load — 3 occurrences, 1 session, 1 user, inside a single ~5 ms burst on `/t/…`, Chrome on Windows, then never recurred. The four Clerk mount points (`(shell)/layout.tsx`'s `UserButton`, and the `SignInButton` in the sidebar, composer, and leaderboard) simply rendered nothing: no plain sentence, no retry, which the rules forbid.
+
+The error boundaries from the subsection above cannot catch this. Clerk loads its UI bundle lazily and mounts it inside an async callback, so the throw happens outside React's render — and a boundary only fires on a throw during render. The exception escaped to `window.onerror`, where PostHog's `capture_exceptions` recorded it (`$exception_handled: false`) but nothing showed the user a way out.
+
+The likely root cause is operational, not code: the production deploy loads Clerk assets from `absolute-mustang-48.clerk.accounts.dev`, a Clerk **development** instance host, which is rate-limited and not served from the production CDN — a known source of exactly this failure.
+
+#### Decided
+
+**Recovery lives on `window`, not around each mount point.** An async throw outside render is only observable at `window`, so a boundary or `try/catch` around `<UserButton />` cannot see it — placement makes no difference. One passive listener for `error` and `unhandledrejection` recognises a `ChunkLoadError` (by `name`, with a message-pattern fallback for the cross-bundle shape variance between Clerk's webpack bundle and this app's Turbopack build) and shows the app's plain-sentence-plus-`Reload` banner. It covers any lazy chunk, not only Clerk's. It never calls `preventDefault`, so PostHog still records the failure — this adds a way out, it does not hide the signal.
+
+**Mounted at the root, as a sibling to the providers.** The failure is global and can come from any lazy chunk, so the listener belongs at the root rather than at one screen; a sibling of the providers so it still renders if a provider's own chunk is what failed.
+
+**The dev-instance host is a deploy fix, not a diff.** Pointing production at production Clerk keys and a production Frontend API domain is an env-var and dashboard change, carried on the PR as an action item.
+
+#### What got built
+
+- `features/chunk-recovery/chunk-load-recovery.tsx`, a client component: the `window` listeners, the `isChunkLoadError` check, and the `Reload` banner in the app's existing failure language.
+- `app/layout.tsx` mounts `<ChunkLoadRecovery />` as a sibling after the providers.
+
+#### Verified
+
+Typecheck, lint and a real production build all pass. The `isChunkLoadError` check was exercised against the real error shapes (webpack `ChunkLoadError`, message-only chunk and CSS-chunk failures, and negatives like a network `TypeError`).
+
+- [x] Decide the approach
+- [x] `window` recovery component with the plain-sentence-plus-`Reload` banner
+- [x] Mounted at the root, sibling to the providers
+- [x] Typecheck, lint and a real production build all pass
+- [x] Detection logic exercised against real `ChunkLoadError` shapes
+- [ ] **Needs a person:** point the production deploy at production Clerk keys and a production Frontend API domain, off the `.clerk.accounts.dev` dev instance
+- [ ] **Needs a person:** in a real browser, block the Clerk asset host (or dispatch a synthetic `ChunkLoadError`) and confirm the banner appears with a keyboard-operable `Reload`, in light and dark
+
 ### A new thread's first answer never appeared until a reload
 
 _Triggered by real use, reported by hand._ On a brand-new thread, the first prompt produced nothing on screen — the models streamed, the answers persisted, but the arena sat at "Thinking…" (or at the empty hero) until the page was reloaded, at which point the full answer was there. Every follow-up in that same thread then streamed live and instantly. The Next dev indicator showed rendering activity throughout the dead window.
