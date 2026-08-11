@@ -19,10 +19,16 @@ export default async function LeaderboardPage({
   const { userId: clerkId } = await auth();
   const viewerId = clerkId ? await findAppUserId(clerkId) : null;
 
-  const needsSignIn = view === "me" && viewerId === null;
-  const rows = needsSignIn
-    ? []
-    : await getLeaderboardStandings(view === "me" ? viewerId : null);
+  // Only a missing Clerk session is a real reason to invite a sign-in. A
+  // signed-in person with no `users` row yet (their first prompt is not
+  // written) has simply cast no votes, so they fall through to EmptyNotice.
+  const needsSignIn = view === "me" && clerkId === null;
+  const rows =
+    view === "me"
+      ? viewerId
+        ? await getLeaderboardStandings(viewerId)
+        : []
+      : await getLeaderboardStandings(null);
 
   return <LeaderboardScreen rows={rows} view={view} needsSignIn={needsSignIn} />;
 }
