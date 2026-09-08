@@ -118,6 +118,7 @@ OPENROUTER_API_KEY=
 
 # Postgres connection string
 DATABASE_URL=postgresql://user:password@localhost:5432/llm_arena
+DIRECT_URL=postgresql://user:password@localhost:5432/llm_arena
 
 # https://dashboard.clerk.com -> API keys
 NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY=
